@@ -24,7 +24,7 @@ export const Route = createFileRoute("/refer")({
 
 function Refer() {
   const { user, state } = useGame();
-  const link = `https://t.me/${BOT_USERNAME}?start=ref_${user.id ?? "guest"}`;
+  const link = `https://t.me/${BOT_USERNAME}?startapp=ref_${user.id ?? "guest"}`;
   const share = () => {
     const url = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Join me on Farm City 🌾 — grow crops and earn!")}`;
     window.open(url, "_blank");
