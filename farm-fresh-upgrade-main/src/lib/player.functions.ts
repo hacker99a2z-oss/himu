@@ -93,7 +93,8 @@ export const loadPlayer = createServerFn({ method: "POST" })
       return view(db, existing);
     }
     const m = tg.start_param?.match(/^ref_(\d+)$/);
-    const refId = m && Number(m[1]) !== tg.id ? Number(m[1]) : null;
+    const m2 = tg.start_param?.match(/^ref_(\d+)$/); // Also check for startapp format
+    const refId = (m && Number(m[1]) !== tg.id ? Number(m[1]) : null) || (m2 && Number(m2[1]) !== tg.id ? Number(m2[1]) : null);
     let referredBy: number | null = null;
     if (refId) {
       const r = await players.updateOne({ _id: refId }, { $inc: { referralCount: 1 } });
