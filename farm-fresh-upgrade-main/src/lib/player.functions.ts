@@ -78,7 +78,20 @@ export const loadPlayer = createServerFn({ method: "POST" })
       { $set: { firstName: tg.first_name, username: tg.username ?? null, photoUrl: tg.photo_url ?? null } },
       { returnDocument: "after" },
     );
-    if (existing) return view(db, existing);
+    if (existing) {
+      // If user exists but has no referrer, check if start_param has referral
+      if (!existing.referredBy && tg.start_param) {
+        const m = tg.start_param.match(/^ref_(\d+)$/);
+        const refId = m && Number(m[1]) !== tg.id ? Number(m[1]) : null;
+        if (refId) {
+          const r = await players.updateOne({ _id: refId }, { $inc: { referralCount: 1 } });
+          if (r.matchedCount) {
+            await players.updateOne({ _id: tg.id }, { $set: { referredBy: refId } });
+          }
+        }
+      }
+      return view(db, existing);
+    }
     const m = tg.start_param?.match(/^ref_(\d+)$/);
     const refId = m && Number(m[1]) !== tg.id ? Number(m[1]) : null;
     let referredBy: number | null = null;
