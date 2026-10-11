@@ -12,7 +12,7 @@ export const CROP_RULES: Record<CropKey, { waterNeed: number; sellCents: number 
 
 export const MIN_WITHDRAW_CENTS = 10;
 export const WATER_PER_PACK = 1000;
-export const PACK_PRICE_CENTS = 100;
+export const PACK_PRICE_CENTS = 10;
 export const REFERRAL_PERCENT = 10;
 export const START_WATER = 100;
 export const MIN_WATER_BUY = 100;
