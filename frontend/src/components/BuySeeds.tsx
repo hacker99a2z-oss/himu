@@ -1,17 +1,13 @@
 import { useEffect, useState } from "react";
-import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { confirmSeedOrder, createSeedOrder, getGramQuote } from "@/lib/player.functions";
+import { gameApi } from "@/lib/api";
 import { CROPS, useGame, type CropKey } from "@/lib/game";
-import { MIN_SEED_BUY, MAX_SEED_BUY, seedPriceCents } from "@/lib/rules";
+import { MIN_SEED_BUY, MAX_SEED_BUY, seedPriceCents } from "@shared/rules";
 import { commentPayload, getWallet } from "@/lib/wallet";
 
 export function BuySeeds({ crop, onOpenChange }: { crop: CropKey | null; onOpenChange: (o: boolean) => void }) {
   const game = useGame();
-  const quote = useServerFn(getGramQuote);
-  const create = useServerFn(createSeedOrder);
-  const confirm = useServerFn(confirmSeedOrder);
   const open = crop !== null;
   const [perDollar, setPerDollar] = useState<number | null>(null);
   const [amount, setAmount] = useState(String(MIN_SEED_BUY));
@@ -25,8 +21,8 @@ export function BuySeeds({ crop, onOpenChange }: { crop: CropKey | null; onOpenC
     if (!open) return undefined;
     setAmount(String(MIN_SEED_BUY));
     setPerDollar(null);
-    void quote().then((q) => setPerDollar(Number(q.nanoPerDollar) / 1e9), () => setPerDollar(-1));
-  }, [open, quote]);
+    void gameApi.gramQuote().then((q) => setPerDollar(Number(q.nanoPerDollar) / 1e9), () => setPerDollar(-1));
+  }, [open]);
 
   const buy = async () => {
     if (!crop) return;
@@ -40,7 +36,7 @@ export function BuySeeds({ crop, onOpenChange }: { crop: CropKey | null; onOpenC
         toast.message("Connect Tonkeeper, then tap Buy again");
         return;
       }
-      const order = await create({ data: { initData: game.initData, crop, qty } });
+      const order = await gameApi.createSeedOrder(game.initData, crop, qty);
       await ui.sendTransaction({
         validUntil: Math.floor(Date.now() / 1000) + 600,
         messages: [{ address: order.address, amount: order.nano, payload: await commentPayload(order.comment) }],
@@ -48,7 +44,7 @@ export function BuySeeds({ crop, onOpenChange }: { crop: CropKey | null; onOpenC
       toast.message("Payment sent, confirming…");
       for (let i = 0; i < 20; i++) {
         await new Promise((r) => setTimeout(r, 4000));
-        const r = await confirm({ data: { initData: game.initData, orderId: order.orderId } });
+        const r = await gameApi.confirmSeedOrder(game.initData, order.orderId);
         if (r.paid && r.player) {
           game.setState(r.player);
           toast.success(`+${qty.toLocaleString("en-US")} ${CROPS[crop].name} seeds added`);

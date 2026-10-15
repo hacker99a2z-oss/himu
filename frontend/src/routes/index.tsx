@@ -1,14 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import { Check, Loader2, PlayCircle } from "lucide-react";
 import { GameShell, SectionTitle } from "@/components/GameShell";
 import { BuySeeds } from "@/components/BuySeeds";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverAnchor } from "@/components/ui/popover";
-import { DAILY_REWARDS, FIELD_PART_COUNTS, GROW_STAGES, growStage, isReady, msLeft } from "@/lib/rules";
-import { claimDaily } from "@/lib/player.functions";
+import { DAILY_REWARDS, FIELD_PART_COUNTS, GROW_STAGES, growStage, isReady, msLeft } from "@shared/rules";
 import { useRewardedAd } from "@/lib/use-ad";
 import { CROPS, CROP_KEYS, haptic, useGame, type CropKey } from "@/lib/game";
 
@@ -78,7 +76,6 @@ function Home() {
 
 function DailyRow() {
   const game = useGame();
-  const claim = useServerFn(claimDaily);
   const [busy, setBusy] = useState(false);
   const done = game.state?.daily.done ?? 0;
   const canClaim = game.state?.daily.canClaim ?? false;
@@ -87,8 +84,7 @@ function DailyRow() {
     if (!game.initData) return void toast.error("Open the game inside Telegram");
     setBusy(true);
     try {
-      const r = await claim({ data: { initData: game.initData } });
-      game.setState(r.player);
+      const r = await game.claimDaily();
       toast.success(`Day ${r.day}: +1 ${CROPS[r.crop].name} seed`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not claim");

@@ -3,7 +3,7 @@ import { Copy, Send } from "lucide-react";
 import { toast } from "sonner";
 import { GameShell, SectionTitle } from "@/components/GameShell";
 import { money, useGame } from "@/lib/game";
-import { REFERRAL_PERCENT } from "@/lib/rules";
+import { REFERRAL_PERCENT } from "@shared/rules";
 
 // Replace with your real bot username.
 const BOT_USERNAME = "FarmerCityBot";

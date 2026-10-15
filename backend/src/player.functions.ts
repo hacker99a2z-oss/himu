@@ -1,4 +1,4 @@
-import { createServerFn } from "@tanstack/react-start";
+import { createServerFn } from "./server-fn.js";
 import {
   CROP_KEYS,
   WITHDRAWAL_HISTORY_LIMIT,
@@ -21,7 +21,7 @@ import {
   tonNanoForUsd,
   type CropKey,
   type PlayerView,
-} from "./rules";
+} from "../../shared/rules.js";
 
 type PlayerDoc = {
   _id: number;
@@ -48,8 +48,8 @@ const initOnly = (d: unknown) => {
 const isCrop = (k: unknown): k is CropKey => typeof k === "string" && (CROP_KEYS as string[]).includes(k);
 
 async function ctx(initData: string) {
-  const { verifyInitData } = await import("./tg.server");
-  const { getDb } = await import("./db.server");
+  const { verifyInitData } = await import("./tg.js");
+  const { getDb } = await import("./db.js");
   const tg = await verifyInitData(initData);
   const db = await getDb();
   return { tg, db, players: db.collection<PlayerDoc>("players") };
@@ -230,7 +230,7 @@ export const sellCrops = createServerFn({ method: "POST" })
   });
 
 export const getGramQuote = createServerFn({ method: "GET" }).handler(async () => {
-  const { getTonUsd } = await import("./ton.server");
+  const { getTonUsd } = await import("./ton.js");
   const price = await getTonUsd();
   // nano Gram for $1 — client scales it by the price in cents
   return { tonUsd: price, nanoPerDollar: tonNanoForUsd(100, price).toString() };
@@ -246,7 +246,7 @@ export const createSeedOrder = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }) => {
     const { tg, db } = await ctx(data.initData);
-    const { getTonUsd, MERCHANT_ADDRESS } = await import("./ton.server");
+    const { getTonUsd, MERCHANT_ADDRESS } = await import("./ton.js");
     const price = await getTonUsd();
     const nano = tonNanoForUsd(seedPriceCents(data.crop, data.qty), price).toString();
     const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
@@ -268,7 +268,7 @@ export const confirmSeedOrder = createServerFn({ method: "POST" })
     if (!order) throw new Error("Order not found");
     if (order.status === "paid") return { paid: true, player: await view(db, (await players.findOne({ _id: tg.id }))!) };
     if (!order.crop || !order.qty) throw new Error("Old order type");
-    const { findPayment } = await import("./ton.server");
+    const { findPayment } = await import("./ton.js");
     const hash = await findPayment(order.comment, BigInt(order.nano));
     if (!hash) return { paid: false, player: null };
     const used = await orders.findOne({ txHash: hash });
@@ -291,7 +291,7 @@ export const withdraw = createServerFn({ method: "POST" })
   })
   .handler(async ({ data }) => {
     const { tg, db, players } = await ctx(data.initData);
-    const { normalizeAddress, getTonUsd } = await import("./ton.server");
+    const { normalizeAddress, getTonUsd } = await import("./ton.js");
     let address: string;
     try {
       address = normalizeAddress(data.address);
@@ -312,7 +312,7 @@ export const withdraw = createServerFn({ method: "POST" })
       status: "pending",
       createdAt: new Date(),
     });
-    const { kickPayouts } = await import("./payout.server");
+    const { kickPayouts } = await import("./payout.js");
     kickPayouts();
     return { player: await view(db, (await players.findOne({ _id: tg.id }))!) };
   });

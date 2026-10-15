@@ -1,12 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { useServerFn } from "@tanstack/react-start";
 import wheatImg from "@/assets/wheat-seed.svg";
 import cornImg from "@/assets/corn-seed.svg";
 import carrotImg from "@/assets/carrot-seed.svg";
 import tomatoImg from "@/assets/tomato-seed.svg";
 import pumpkinImg from "@/assets/pumpkin-seed.svg";
-import { CROP_KEYS, CROP_RULES, type CropKey, type PlayerView } from "./rules";
-import { loadPlayer, sellCrops, tapField, withdraw as withdrawFn } from "./player.functions";
+import { CROP_KEYS, CROP_RULES, type CropKey, type PlayerView } from "@shared/rules";
+import { gameApi } from "./api";
 
 export { CROP_KEYS, type CropKey };
 
@@ -34,6 +33,7 @@ type GameCtx = {
   tap: (k: CropKey, part: number) => Promise<Result>;
   sell: (k: CropKey, qty: number) => Promise<Result>;
   withdraw: (cents: number, address: string) => Promise<Result>;
+  claimDaily: () => Promise<{ day: number; crop: CropKey }>;
 };
 
 const Ctx = createContext<GameCtx | null>(null);
@@ -56,10 +56,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<TgUser>({ id: null, name: "Farmer" });
   const [initData, setInitData] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const load = useServerFn(loadPlayer);
-  const tapFn = useServerFn(tapField);
-  const sellFn = useServerFn(sellCrops);
-  const wdFn = useServerFn(withdrawFn);
+  const load = useCallback((data: { data: { initData: string } }) => gameApi.loadPlayer(data.data.initData), []);
 
   useEffect(() => {
     const tg = getTg();
@@ -80,7 +77,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     async (k: CropKey, part: number): Promise<Result> => {
       if (!initData) return { ok: false, message: "Open the game inside Telegram" };
       try {
-        const r = await tapFn({ data: { initData, crop: k, part } });
+        const r = await gameApi.tapField(initData, k, part);
         setState(r.player);
         const name = CROPS[k].name;
         const msg = r.ok ? (r.message === "planted" ? `${name} planted! 🌱` : `Harvested 1 ${name}!`) : r.message;
@@ -89,7 +86,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         return { ok: false, message: errMsg(e) };
       }
     },
-    [initData, tapFn],
+    [initData],
   );
 
   const value = useMemo<GameCtx>(
@@ -101,15 +98,21 @@ export function GameProvider({ children }: { children: ReactNode }) {
       setState,
       refresh: async () => {
         if (!initData) throw new Error("Open the game inside Telegram");
-        const r = await load({ data: { initData } });
+        const r = await gameApi.loadPlayer(initData);
         setState(r);
         return r;
+      },
+      claimDaily: async () => {
+        if (!initData) throw new Error("Open the game inside Telegram");
+        const r = await gameApi.claimDaily(initData);
+        setState(r.player);
+        return { day: r.day, crop: r.crop };
       },
       tap,
       sell: async (k, qty) => {
         if (!initData) return { ok: false, message: "Open the game inside Telegram" };
         try {
-          const r = await sellFn({ data: { initData, crop: k, qty } });
+          const r = await gameApi.sellCrops(initData, k, qty);
           setState(r.player);
           return { ok: true, message: `Sold for ${money(r.earnedCents)}` };
         } catch (e) {
@@ -119,7 +122,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
       withdraw: async (cents, address) => {
         if (!initData) return { ok: false, message: "Open the game inside Telegram" };
         try {
-          const r = await wdFn({ data: { initData, cents, address } });
+          const r = await gameApi.withdraw(initData, cents, address);
           setState(r.player);
           return { ok: true, message: "Withdraw queued — arrives in about 1 minute" };
         } catch (e) {
@@ -127,7 +130,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
         }
       },
     }),
-    [state, user, initData, error, load, tap, sellFn, wdFn],
+    [state, user, initData, error, load, tap],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { ADSGRAM_BLOCK_ID } from "./ads";
 import { useGame } from "./game";
-import type { CropKey } from "./rules";
+import { gameApi } from "./api";
+import type { CropKey } from "@shared/rules";
 
 type AdController = { 
   show: () => Promise<{ done: boolean; description: string; state: string; error: boolean }>; 
@@ -33,7 +34,7 @@ export function useRewardedAd() {
   const secs = Math.ceil(left / 1000);
   const timer = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
 
-  /** Plays an ad; after successful watch, calls reward endpoint for verification. */
+  /** Rewards are applied only after AdsGram's authenticated server callback is confirmed. */
   const play = async (crop: CropKey, part: number, onDone: () => Promise<void>) => {
     if (loading || left) return;
     if (!game.initData) throw new Error("Open the game inside Telegram");
@@ -41,20 +42,31 @@ export function useRewardedAd() {
 
     if (!AdControllerRef.current) throw new Error("Ads are not available right now");
     setLoading(true);
+    let sessionId: string | undefined;
     try {
-      // Show the ad
+      const session = await gameApi.startAdSession(game.initData, crop, part);
+      sessionId = session.sessionId;
       const result = await AdControllerRef.current.show();
-      if (!result.done) throw new Error("Watch the ad till the end to speed up growth");
+      if (!result.done) {
+        await gameApi.cancelAdSession(game.initData, sessionId).catch(() => undefined);
+        sessionId = undefined;
+        throw new Error("Watch the ad till the end to speed up growth");
+      }
 
-      // Call reward endpoint manually after successful ad watch
-      const rewardUrl = `${window.location.origin}/reward?userid=${game.user.id}&crop=${crop}&part=${part}`;
-      await fetch(rewardUrl);
-
-      await onDone();
-      setNow(Date.now());
-    } catch (result) {
-      // Error during ad playback - user didn't watch till end or ad failed
-      throw new Error(result instanceof Error ? result.message : "Ad playback failed");
+      for (let attempt = 0; attempt < 45; attempt++) {
+        const status = await gameApi.getAdSessionStatus(game.initData, sessionId);
+        if (status.verified && status.player) {
+          game.setState(status.player);
+          await onDone();
+          setNow(Date.now());
+          return;
+        }
+        if (status.expired) throw new Error("Ad verification expired. Please try again.");
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+      throw new Error("Ad watched; waiting for AdsGram server verification. Please reopen the field shortly.");
+    } catch (error) {
+      throw new Error(error instanceof Error ? error.message : "Ad playback failed");
     } finally {
       setLoading(false);
     }

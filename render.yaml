@@ -3,9 +3,10 @@ services:
     name: farm-city
     env: node
     plan: free
-    rootDir: farm-fresh-upgrade-main
-    buildCommand: npm install && npm run build
-    startCommand: node .output/server/index.mjs
+    rootDir: .
+    buildCommand: npm ci && npm run build:backend
+    startCommand: npm run start:backend
+    healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
         value: 20
@@ -23,7 +24,11 @@ services:
         sync: false
       - key: TONCENTER_API_KEY
         sync: false
+      - key: ADSGRAM_REWARD_SECRET
+        sync: false
       - key: PAYOUT_CRON_SECRET
+        sync: false
+      - key: FRONTEND_URL
         sync: false
       - key: WEBAPP_URL
         sync: false

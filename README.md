@@ -30,6 +30,8 @@ Prefer working locally? You need Node.js and npm — [install with nvm](https://
 ```sh
 git clone <this-repository-url>
 cd <repository-name>
-npm i
+npm ci
 npm run dev
 ```
+
+The app is split between `frontend/` (Vercel static Telegram Mini App) and `backend/` (Render API); shared game rules are in `shared/`. See [RENDER_SETUP.md](./RENDER_SETUP.md) for deployment and required environment variables.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CROP_RULES, GROW_MS, dailyStatus, dayKey, fieldParts, growStage, isReady, seedPriceCents } from "./rules";
+import { CROP_RULES, GROW_MS, dailyStatus, dayKey, fieldParts, growStage, isReady, seedPriceCents } from "./rules.js";
 
 describe("seeds, growth and daily reward", () => {
   it("ads needed per crop", () => {

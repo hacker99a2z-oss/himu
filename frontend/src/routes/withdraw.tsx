@@ -1,16 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { GameShell, SectionTitle } from "@/components/GameShell";
 import { Button } from "@/components/ui/button";
-import { getWithdrawalLinks } from "@/lib/withdrawal-links.functions";
-import { latestWithdrawals } from "@/lib/rules";
+import { gameApi } from "@/lib/api";
+import { latestWithdrawals, MIN_WITHDRAW_CENTS } from "@shared/rules";
 import { money, useGame } from "@/lib/game";
-import { MIN_WITHDRAW_CENTS } from "@/lib/rules";
 import { getWallet, shortAddr, useWalletAddress } from "@/lib/wallet";
 
 export const Route = createFileRoute("/withdraw")({
-  loader: () => getWithdrawalLinks(),
   head: () => ({
     meta: [
       { title: "Withdraw — Farm City" },
@@ -26,13 +24,24 @@ export const Route = createFileRoute("/withdraw")({
 
 function Withdraw() {
   const game = useGame();
-  const links = Route.useLoaderData();
+  const [links, setLinks] = useState<{ paymentsProof: string | null; contactSupport: string | null }>({
+    paymentsProof: null,
+    contactSupport: null,
+  });
   const history = latestWithdrawals(game.state?.withdrawals ?? []);
   const address = useWalletAddress();
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState(false);
   const balance = game.state?.balanceCents ?? 0;
   const pct = Math.min(100, (balance / MIN_WITHDRAW_CENTS) * 100);
+
+  useEffect(() => {
+    let active = true;
+    void gameApi.withdrawalLinks().then((result) => active && setLinks(result));
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();

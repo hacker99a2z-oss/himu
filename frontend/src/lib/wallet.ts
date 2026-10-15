@@ -1,13 +1,17 @@
 // Browser-only Tonkeeper (TON Connect) helper. Loaded lazily so server rendering never touches it.
 import { useEffect, useState } from "react";
 import type { TonConnectUI } from "@tonconnect/ui";
+import { apiOrigin } from "./api";
 
 let instance: Promise<TonConnectUI> | null = null;
 
 export function getWallet(): Promise<TonConnectUI> {
   if (!instance) {
     instance = import("@tonconnect/ui").then(
-      ({ TonConnectUI }) => new TonConnectUI({ manifestUrl: `${window.location.origin}/tonconnect-manifest.json` }),
+      ({ TonConnectUI }) =>
+        new TonConnectUI({
+          manifestUrl: `${apiOrigin || window.location.origin}/tonconnect-manifest.json`,
+        }),
     );
   }
   return instance;
