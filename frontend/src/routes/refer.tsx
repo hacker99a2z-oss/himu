@@ -6,7 +6,7 @@ import { money, useGame } from "@/lib/game";
 import { REFERRAL_PERCENT } from "@shared/rules";
 
 // Replace with your real bot username.
-const BOT_USERNAME = "FarmerCityBot";
+const BOT_USERNAME = "farmingzoon_bot";
 
 export const Route = createFileRoute("/refer")({
   head: () => ({
