@@ -109,7 +109,7 @@ async function route(request: IncomingMessage, response: ServerResponse, url: UR
     response.end();
     return;
   }
-  if (request.method === "GET" && url.pathname === "/health") {
+  if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/health") {
     sendJson(response, 200, { ok: true, service: "farm-city-api" });
     return;
   }
