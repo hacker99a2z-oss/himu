@@ -1,1 +1,0 @@
-- [External package deployments](external-package-deploy.md) — keep lockfile download URLs publicly reachable; Replit-only package hosts break Render installs.
