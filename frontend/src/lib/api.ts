@@ -41,7 +41,10 @@ export const gameApi = {
   withdrawalLinks: () =>
     request<{ paymentsProof: string | null; contactSupport: string | null }>("/api/withdrawal-links"),
   startAdSession: (initData: string, crop: CropKey, part: number) =>
-    request<{ sessionId: string }>("/api/ads/session/start", { initData, crop, part }),
+    request<{ sessionId: string; resumed: boolean; crop: CropKey; part: number }>(
+      "/api/ads/session/start",
+      { initData, crop, part },
+    ),
   getAdSessionStatus: (initData: string, sessionId: string) =>
     request<{ verified: boolean; expired: boolean; player: PlayerView | null }>("/api/ads/session/status", {
       initData,

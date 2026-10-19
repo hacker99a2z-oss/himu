@@ -12,7 +12,7 @@ import { getDb } from "./db.js";
 import { loadPlayer } from "./player.functions.js";
 import { verifyInitData } from "./tg.js";
 
-const SESSION_TTL_MS = 10 * 60 * 1000;
+const SESSION_TTL_MS = 5 * 60 * 1000;
 
 type AdSession = {
   _id: number;
@@ -31,6 +31,9 @@ type Player = {
   lastAdAt?: Date;
   lastAdSessionId?: string;
 };
+
+const isSessionExpired = (session: AdSession, now: number) =>
+  session.expiresAt.getTime() <= now || session.createdAt.getTime() + SESSION_TTL_MS <= now;
 
 function validInput(input: unknown): input is { initData: string; crop: CropKey; part: number } {
   if (!input || typeof input !== "object") return false;
@@ -63,18 +66,43 @@ export async function startAdSession(input: unknown) {
   if (!player) throw new Error("Player not found");
 
   const now = new Date();
+  const sessions = db.collection<AdSession>("ad_sessions");
+  await sessions.updateOne(
+    {
+      _id: tg.id,
+      status: "pending",
+      $or: [
+        { expiresAt: { $lte: now } },
+        { createdAt: { $lte: new Date(now.getTime() - SESSION_TTL_MS) } },
+      ],
+    },
+    { $set: { status: "expired" } },
+  );
+
+  // AdsGram identifies reward callbacks by Telegram user ID, not by session ID.
+  // Keep one live session per user and let the client resume checking it rather
+  // than opening a second ad that could be credited to the wrong field.
+  const activeSession = await sessions.findOne({
+    _id: tg.id,
+    status: "pending",
+    expiresAt: { $gt: now },
+    createdAt: { $gt: new Date(now.getTime() - SESSION_TTL_MS) },
+  });
+  if (activeSession) {
+    return {
+      sessionId: activeSession.sessionId,
+      resumed: true,
+      crop: activeSession.crop,
+      part: activeSession.part,
+    };
+  }
+
   if (player.lastAdAt && player.lastAdAt.getTime() + AD_COOLDOWN_MS > now.getTime()) {
     throw new Error("Please wait for the timer to finish");
   }
   const field = fieldParts(input.crop, player.fields?.[input.crop] as never)[input.part];
   if (!field?.planted) throw new Error("Plant a seed first");
   if (isReady(input.crop, field, now.getTime())) throw new Error("Already fully grown — tap to harvest");
-
-  const sessions = db.collection<AdSession>("ad_sessions");
-  await sessions.updateOne(
-    { _id: tg.id, status: "pending", expiresAt: { $lte: now } },
-    { $set: { status: "expired" } },
-  );
 
   const sessionId = crypto.randomUUID().replace(/-/g, "");
   try {
@@ -94,12 +122,25 @@ export async function startAdSession(input: unknown) {
     );
   } catch (error) {
     if ((error as { code?: number })?.code === 11000) {
-      throw new Error("An ad is already waiting for verification");
+      const racedSession = await sessions.findOne({
+        _id: tg.id,
+        status: "pending",
+        expiresAt: { $gt: now },
+        createdAt: { $gt: new Date(now.getTime() - SESSION_TTL_MS) },
+      });
+      if (racedSession) {
+        return {
+          sessionId: racedSession.sessionId,
+          resumed: true,
+          crop: racedSession.crop,
+          part: racedSession.part,
+        };
+      }
     }
     throw error;
   }
 
-  return { sessionId };
+  return { sessionId, resumed: false, crop: input.crop, part: input.part };
 }
 
 export async function cancelAdSession(input: unknown) {
@@ -132,7 +173,7 @@ export async function getAdSessionStatus(input: unknown) {
     sessionId: data.sessionId,
   });
   if (!session) throw new Error("Ad session not found");
-  if (session.status === "pending" && session.expiresAt.getTime() <= Date.now()) {
+  if (session.status === "pending" && isSessionExpired(session, Date.now())) {
     await db.collection<AdSession>("ad_sessions").updateOne(
       { _id: tg.id, sessionId: data.sessionId, status: "pending" },
       { $set: { status: "expired" } },
@@ -146,26 +187,44 @@ export async function getAdSessionStatus(input: unknown) {
 /** AdsGram server callback. The URL secret is configured in its publisher dashboard, never in the browser. */
 export async function verifyAdsgramReward(userId: string | null, suppliedSecret: string | null) {
   const expectedSecret = process.env["ADSGRAM_REWARD_SECRET"];
-  if (!expectedSecret || !suppliedSecret || !safeSecretEqual(suppliedSecret, expectedSecret)) {
-    return { status: 403, message: "Forbidden" };
+  if (!expectedSecret) {
+    console.error("[adsgram] Reward callback rejected: ADSGRAM_REWARD_SECRET is not configured");
+    return { status: 503, message: "Reward verification is not configured" };
   }
-  if (!userId || !/^\d{1,20}$/.test(userId)) return { status: 400, message: "Invalid user" };
+  if (!suppliedSecret || !safeSecretEqual(suppliedSecret, expectedSecret)) {
+    console.warn("[adsgram] Reward callback rejected: secret mismatch");
+    return { status: 403, message: "Invalid reward key" };
+  }
+  if (!userId || !/^\d{1,20}$/.test(userId)) {
+    console.warn("[adsgram] Reward callback rejected: missing or invalid userid parameter");
+    return { status: 400, message: "Invalid userid" };
+  }
   const telegramId = Number(userId);
-  if (!Number.isSafeInteger(telegramId)) return { status: 400, message: "Invalid user" };
+  if (!Number.isSafeInteger(telegramId)) {
+    console.warn("[adsgram] Reward callback rejected: userid is not a safe integer");
+    return { status: 400, message: "Invalid userid" };
+  }
 
   const db = await getDb();
   const sessions = db.collection<AdSession>("ad_sessions");
   const session = await sessions.findOne({ _id: telegramId });
-  if (!session) return { status: 404, message: "No pending ad" };
+  if (!session) {
+    console.warn("[adsgram] Reward callback rejected: no ad session for this user");
+    return { status: 404, message: "No ad session" };
+  }
   if (session.status === "verified") return { status: 200, message: "Already verified" };
-  if (session.status !== "pending" || session.expiresAt.getTime() <= Date.now()) {
+  if (session.status !== "pending" || isSessionExpired(session, Date.now())) {
+    console.warn(`[adsgram] Reward callback rejected: session is ${session.status} or expired`);
     return { status: 410, message: "No active ad session" };
   }
 
   const players = db.collection<Player>("players");
   for (let attempt = 0; attempt < 3; attempt++) {
     const player = await players.findOne({ _id: telegramId });
-    if (!player) return { status: 404, message: "Player not found" };
+    if (!player) {
+      console.warn("[adsgram] Reward callback rejected: player not found");
+      return { status: 404, message: "Player not found" };
+    }
 
     // A retry after the player update but before the session update must not award twice.
     if (player.lastAdSessionId === session.sessionId) {
@@ -173,20 +232,24 @@ export async function verifyAdsgramReward(userId: string | null, suppliedSecret:
         { _id: telegramId, sessionId: session.sessionId, status: "pending" },
         { $set: { status: "verified", verifiedAt: new Date() } },
       );
+      console.info("[adsgram] Reward callback accepted");
       return { status: 200, message: "Verified" };
     }
 
     const now = Date.now();
     if (player.lastAdAt && player.lastAdAt.getTime() + AD_COOLDOWN_MS > now) {
+      console.warn("[adsgram] Reward callback rejected: ad cooldown is active");
       return { status: 429, message: "Ad cooldown active" };
     }
     if (!CROP_KEYS.includes(session.crop) || !isFieldPart(session.crop, session.part)) {
+      console.warn("[adsgram] Reward callback rejected: invalid crop or field part in session");
       return { status: 400, message: "Invalid ad session" };
     }
 
     const list = fieldParts(session.crop, player.fields?.[session.crop] as never);
     const field = list[session.part]!;
     if (!field.planted || isReady(session.crop, field, now)) {
+      console.warn("[adsgram] Reward callback rejected: target field is not eligible");
       return { status: 409, message: "Field is no longer eligible" };
     }
     list[session.part] = { ...field, ads: Math.min(CROP_RULES[session.crop].adsNeed, field.ads + 1) };
@@ -211,7 +274,9 @@ export async function verifyAdsgramReward(userId: string | null, suppliedSecret:
       { _id: telegramId, sessionId: session.sessionId, status: "pending" },
       { $set: { status: "verified", verifiedAt: new Date(now) } },
     );
+    console.info("[adsgram] Reward callback accepted");
     return { status: 200, message: "Verified" };
   }
+  console.warn("[adsgram] Reward callback could not update player after three attempts");
   return { status: 409, message: "Try again" };
 }

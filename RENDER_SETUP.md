@@ -59,7 +59,11 @@ In the AdsGram publisher dashboard, set the rewarded ad unit's **Reward URL** to
 https://YOUR-RENDER-SERVICE.onrender.com/api/adsgram/reward?userid=[userId]&key=YOUR_ADSGRAM_REWARD_SECRET
 ```
 
-Use the exact same random value for the Render `ADSGRAM_REWARD_SECRET` variable and the URL's `key`. The frontend only starts an authenticated ad session; seed growth is applied only after this server callback succeeds. Do not put the secret in frontend code.
+Use the exact same URL-safe random value for the Render `ADSGRAM_REWARD_SECRET` variable and the URL's `key`. Keep the AdsGram `[userId]` placeholder exactly as shown; AdsGram replaces it with the Telegram user ID. The URL must be the public HTTPS Render URL, and the Reward URL must be saved on the rewarded ad unit used by block `41655`.
+
+The frontend never grants ad progress. It only starts an authenticated session and checks its status; the backend updates MongoDB only after the secret-protected AdsGram callback succeeds. A dashboard impression does not by itself prove that the Reward URL callback succeeded. In Render logs, `[adsgram] Reward callback accepted` means it did; a rejection log gives a safe reason such as a missing server secret, incorrect key, missing `userid`, expired session, or ineligible field. Never put the secret in the frontend or a `VITE_*` variable.
+
+AdsGram does not send the callback in SDK debug mode. Also, its `show()` promise rejects when playback fails or no ad is available; the app now cancels that unfinished session so it does not remain stuck as pending.
 
 Configure your cron service to request:
 

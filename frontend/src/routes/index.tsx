@@ -203,11 +203,8 @@ function AdPanel({ k, part, onDone }: { k: CropKey; part: number; onDone: () => 
 
   const watch = async () => {
     try {
-      await ad.play(k, part, async () => {
-        // Server already verified and updated via reward callback
-        // Just refresh the game state
-        game.setState(await game.refresh());
-        toast.success(`${crop.name} grew a little 🌱`);
+      await ad.play(k, part, async (verifiedCrop) => {
+        toast.success(`${CROPS[verifiedCrop].name} grew a little 🌱`);
         onDone();
       });
     } catch (e) {
