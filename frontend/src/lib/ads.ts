@@ -4,11 +4,13 @@ export type AdsgramInitOptions = {
   debugBannerType?: "RewardedVideo" | "FullscreenMedia";
 };
 
-// Shudhu apnar main Block ID "41655" bebohar kora hocche
-export const ADSGRAM_BLOCK_ID = "54866";
+// আপনার Adsgram Test Block ID
+export const ADSGRAM_TEST_BLOCK_ID = "54866"; 
 
 export function getAdsgramInitOptions(): AdsgramInitOptions {
   return {
-    blockId: ADSGRAM_BLOCK_ID,
+    blockId: ADSGRAM_TEST_BLOCK_ID,
+    debug: true, // এটি অবশ্যই true রাখতে হবে টেস্ট অ্যাডের জন্য
+    debugBannerType: "RewardedVideo",
   };
 }
