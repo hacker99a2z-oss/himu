@@ -297,9 +297,10 @@ export const createUnlockOrder = createServerFn({ method: "POST" })
 
 export const confirmSeedOrder = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => {
-    const o = initOnly(d) as { initData: string; orderId?: unknown };
+    const o = initOnly(d) as { initData: string; orderId?: unknown; txHash?: unknown };
     if (typeof o.orderId !== "string" || !/^[a-f0-9]{16}$/.test(o.orderId)) throw new Error("Invalid order");
-    return o as { initData: string; orderId: string };
+    if (o.txHash && typeof o.txHash !== "string") throw new Error("Invalid transaction hash");
+    return o as { initData: string; orderId: string; txHash?: string };
   })
   .handler(async ({ data }) => {
     const { tg, db, players } = await ctx(data.initData);
@@ -309,8 +310,21 @@ export const confirmSeedOrder = createServerFn({ method: "POST" })
     if (order.status === "paid") return { paid: true, player: await view(db, (await players.findOne({ _id: tg.id }))!) };
     const isUnlock = order.type === "unlock";
     if (!order.crop || (!isUnlock && !order.qty)) throw new Error("Old order type");
-    const { findPayment } = await import("./ton.js");
-    const hash = await findPayment(order.comment, BigInt(order.nano));
+
+    let hash: string | null = null;
+    if (data.txHash) {
+      // Manual confirmation with transaction hash
+      const { verifyTransaction } = await import("./ton.js");
+      const verified = await verifyTransaction(data.txHash, order.comment, BigInt(order.nano));
+      if (verified) {
+        hash = data.txHash;
+      }
+    } else {
+      // Automatic confirmation via comment search
+      const { findPayment } = await import("./ton.js");
+      hash = await findPayment(order.comment, BigInt(order.nano));
+    }
+
     if (!hash) return { paid: false, player: null };
     const used = await orders.findOne({ txHash: hash });
     if (used) throw new Error("Payment already used");
