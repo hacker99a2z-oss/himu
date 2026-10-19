@@ -306,23 +306,19 @@ export const confirmSeedOrder = createServerFn({ method: "POST" })
     const orders = db.collection<{ _id: string; type?: string; cents?: number; telegramId: number; crop?: CropKey; qty?: number; nano: string; comment: string; status: string; txHash?: string }>("orders");
     const order = await orders.findOne({ _id: data.orderId, telegramId: tg.id });
     if (!order) throw new Error("Order not found");
-    console.log("confirmSeedOrder - order found:", order);
     if (order.status === "paid") return { paid: true, player: await view(db, (await players.findOne({ _id: tg.id }))!) };
     const isUnlock = order.type === "unlock";
     if (!order.crop || (!isUnlock && !order.qty)) throw new Error("Old order type");
     const { findPayment } = await import("./ton.js");
     const hash = await findPayment(order.comment, BigInt(order.nano));
-    console.log("confirmSeedOrder - payment hash:", hash);
     if (!hash) return { paid: false, player: null };
     const used = await orders.findOne({ txHash: hash });
     if (used) throw new Error("Payment already used");
     const claim = await orders.updateOne({ _id: order._id, status: "pending" }, { $set: { status: "paid", txHash: hash, paidAt: new Date() } });
-    console.log("confirmSeedOrder - order updated:", claim.modifiedCount);
     if (claim.modifiedCount) {
       const me = isUnlock
         ? await players.findOneAndUpdate({ _id: tg.id }, { $set: { [`unlocked.${order.crop}`]: true } }, { returnDocument: "after" })
         : await players.findOneAndUpdate({ _id: tg.id }, { $inc: { [`seeds.${order.crop}`]: order.qty! } }, { returnDocument: "after" });
-      console.log("confirmSeedOrder - player updated:", me);
       const paidCents = isUnlock ? (order.cents ?? UNLOCK_CENTS[order.crop] ?? 0) : seedPriceCents(order.crop, order.qty!);
       const reward = referralRewardCents(paidCents);
       if (me?.referredBy && reward > 0) await players.updateOne({ _id: me.referredBy }, { $inc: { balanceCents: reward, referralEarnedCents: reward } });
