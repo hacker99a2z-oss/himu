@@ -32,7 +32,7 @@ export function useRewardedAd() {
   const nextAdAt = game.state?.nextAdAt ?? null;
   const left = nextAdAt ? Math.max(0, nextAdAt - (now + offset)) : 0;
   const AdControllerRef = useRef<AdController | undefined>(undefined);
-  const adsgramOptions = useMemo(() => getAdsgramInitOptions(import.meta.env.DEV), []);
+  const adsgramOptions = useMemo(() => getAdsgramInitOptions(), []);
 
   // Initialize AdsGram controller once
   useEffect(() => {
