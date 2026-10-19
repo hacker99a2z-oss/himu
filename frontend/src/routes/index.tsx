@@ -203,10 +203,13 @@ function AdPanel({ k, part, onDone }: { k: CropKey; part: number; onDone: () => 
 
   const watch = async () => {
     try {
-      await ad.play(k, part, async (verifiedCrop) => {
+      const result = await ad.play(k, part, async (verifiedCrop) => {
         toast.success(`${CROPS[verifiedCrop].name} grew a little 🌱`);
         onDone();
       });
+      if (result === "test") {
+        toast.message("Test ad played. AdsGram debug ads do not grant crop growth.");
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Ad could not be played");
     }

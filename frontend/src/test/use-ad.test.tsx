@@ -21,10 +21,12 @@ vi.mock("@/lib/api", () => ({ gameApi }));
 vi.mock("@/lib/game", () => ({ useGame: () => game }));
 
 import { useRewardedAd } from "@/lib/use-ad";
+import { getAdsgramInitOptions } from "@/lib/ads";
 
 describe("rewarded ad session handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv("DEV", false);
     game.state = { serverNow: Date.now(), nextAdAt: null };
     gameApi.startAdSession.mockResolvedValue({
       sessionId: "a".repeat(32),
@@ -41,14 +43,51 @@ describe("rewarded ad session handling", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     Reflect.deleteProperty(window, "Adsgram");
+  });
+
+  it("uses AdsGram's test creative only in development", () => {
+    expect(getAdsgramInitOptions(true)).toEqual({
+      blockId: "int-41387",
+      debug: true,
+      debugBannerType: "RewardedVideo",
+    });
+    expect(getAdsgramInitOptions(false)).toEqual({ blockId: "41655" });
+  });
+
+  it("plays the development test ad without creating or rewarding a crop session", async () => {
+    vi.stubEnv("DEV", true);
+    show.mockResolvedValue({
+      done: true,
+      description: "completed",
+      state: "destroy",
+      error: false,
+    });
+    const onDone = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useRewardedAd());
+
+    expect(adsgramInit).toHaveBeenCalledWith({
+      blockId: "int-41387",
+      debug: true,
+      debugBannerType: "RewardedVideo",
+    });
+
+    await act(async () => {
+      await expect(result.current.play("wheat", 0, onDone)).resolves.toBe("test");
+    });
+
+    expect(show).toHaveBeenCalledOnce();
+    expect(gameApi.startAdSession).not.toHaveBeenCalled();
+    expect(gameApi.getAdSessionStatus).not.toHaveBeenCalled();
+    expect(onDone).not.toHaveBeenCalled();
   });
 
   it("cancels an unfinished session when AdsGram has no ad available", async () => {
     show.mockRejectedValue({ description: "banner not found", state: "load", error: true });
     const { result } = renderHook(() => useRewardedAd());
 
-    expect(adsgramInit).toHaveBeenCalledWith({ blockId: "41655" });
+    expect(adsgramInit).toHaveBeenCalledWith(getAdsgramInitOptions(false));
 
     await act(async () => {
       await expect(result.current.play("wheat", 0, vi.fn())).rejects.toThrow(
@@ -56,7 +95,10 @@ describe("rewarded ad session handling", () => {
       );
     });
 
-    expect(gameApi.cancelAdSession).toHaveBeenCalledWith("signed-telegram-init-data", "a".repeat(32));
+    expect(gameApi.cancelAdSession).toHaveBeenCalledWith(
+      "signed-telegram-init-data",
+      "a".repeat(32),
+    );
   });
 
   it("resumes checking a pending session without opening another ad", async () => {
