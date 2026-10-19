@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { gameApi, game, show } = vi.hoisted(() => ({
+const { gameApi, game, show, adsgramInit } = vi.hoisted(() => ({
   gameApi: {
     startAdSession: vi.fn(),
     getAdSessionStatus: vi.fn(),
@@ -14,6 +14,7 @@ const { gameApi, game, show } = vi.hoisted(() => ({
     setState: vi.fn(),
   },
   show: vi.fn(),
+  adsgramInit: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => ({ gameApi }));
@@ -32,9 +33,10 @@ describe("rewarded ad session handling", () => {
       part: 0,
     });
     gameApi.cancelAdSession.mockResolvedValue({ cancelled: true });
+    adsgramInit.mockImplementation(() => ({ show }));
     Object.defineProperty(window, "Adsgram", {
       configurable: true,
-      value: { init: vi.fn(() => ({ show })) },
+      value: { init: adsgramInit },
     });
   });
 
@@ -45,6 +47,8 @@ describe("rewarded ad session handling", () => {
   it("cancels an unfinished session when AdsGram has no ad available", async () => {
     show.mockRejectedValue({ description: "banner not found", state: "load", error: true });
     const { result } = renderHook(() => useRewardedAd());
+
+    expect(adsgramInit).toHaveBeenCalledWith({ blockId: "41655" });
 
     await act(async () => {
       await expect(result.current.play("wheat", 0, vi.fn())).rejects.toThrow(
