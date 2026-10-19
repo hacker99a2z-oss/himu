@@ -36,8 +36,8 @@ export const gameApi = {
   loadContest: (initData: string) => request<ContestView>("/api/contest/load", { initData }),
   enterContest: (initData: string) =>
     request<{ contest: ContestView; player: PlayerView }>("/api/contest/enter", { initData }),
-  confirmSeedOrder: (initData: string, orderId: string) =>
-    request<{ paid: boolean; player: PlayerView | null }>("/api/orders/confirm", { initData, orderId }),
+  confirmSeedOrder: (initData: string, orderId: string, txHash?: string) =>
+    request<{ paid: boolean; player: PlayerView | null }>("/api/orders/confirm", { initData, orderId, txHash }),
   withdrawalLinks: () =>
     request<{ paymentsProof: string | null; contactSupport: string | null }>("/api/withdrawal-links"),
   startAdSession: (initData: string, crop: CropKey, part: number) =>
