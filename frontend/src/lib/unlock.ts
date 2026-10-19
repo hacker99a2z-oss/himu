@@ -11,13 +11,21 @@ export async function unlockCrop(game: ReturnType<typeof useGame>, crop: CropKey
     return { ok: false, message: "Connect Tonkeeper, then tap the lock again" };
   }
   const order = await gameApi.createUnlockOrder(game.initData, crop);
-  await ui.sendTransaction({
-    validUntil: Math.floor(Date.now() / 1000) + 600,
-    messages: [{ address: order.address, amount: order.nano, payload: await commentPayload(order.comment) }],
-  });
+  let txHash: string | null = null;
+  try {
+    const result = await ui.sendTransaction({
+      validUntil: Math.floor(Date.now() / 1000) + 600,
+      messages: [{ address: order.address, amount: order.nano, payload: await commentPayload(order.comment) }],
+    });
+    txHash = result?.[0]?.hash ?? null;
+  } catch (e) {
+    // Transaction cancelled or failed
+    return { ok: false, message: "Transaction cancelled or failed" };
+  }
+
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 4000));
-    const r = await gameApi.confirmSeedOrder(game.initData, order.orderId);
+    const r = await gameApi.confirmSeedOrder(game.initData, order.orderId, txHash ?? undefined);
     if (r.paid && r.player) {
       game.setState(r.player);
       return { ok: true, message: `${CROPS[crop].name} unlocked — unlimited seeds! 🎉` };
