@@ -9,10 +9,7 @@ export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),
   plugins: [
     nodePolyfills({
-      include: ["buffer"],
-      globals: {
-        Buffer: true,
-      },
+      protocolImports: true,
     }),
     tanstackRouter({
       target: "react",
@@ -23,9 +20,6 @@ export default defineConfig({
     tailwindcss(),
   ],
   resolve: { tsconfigPaths: true },
-  define: {
-    global: "globalThis",
-  },
   server: {
     host: "0.0.0.0",
     port: 5000,
