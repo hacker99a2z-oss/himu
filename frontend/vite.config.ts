@@ -3,10 +3,17 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
+import { nodePolyfills } from "vite-plugin-node-polyfills";
 
 export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),
   plugins: [
+    nodePolyfills({
+      include: ["buffer"],
+      globals: {
+        Buffer: true,
+      },
+    }),
     tanstackRouter({
       target: "react",
       routesDirectory: "./src/routes",
@@ -16,6 +23,9 @@ export default defineConfig({
     tailwindcss(),
   ],
   resolve: { tsconfigPaths: true },
+  define: {
+    global: "globalThis",
+  },
   server: {
     host: "0.0.0.0",
     port: 5000,
