@@ -16,6 +16,7 @@ import {
 } from "./player.functions.js";
 import { handleTelegramUpdate } from "./telegram-webhook.js";
 import { publicWithdrawalUrl } from "./withdrawal-links.js";
+import { getRecentTransactions } from "./ton.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const localOrigins = new Set(["http://localhost:5000", "http://127.0.0.1:5000"]);
@@ -134,6 +135,28 @@ async function route(request: IncomingMessage, response: ServerResponse, url: UR
   }
   if (request.method === "GET" && url.pathname === "/api/ton/quote") {
     sendJson(response, 200, await getGramQuote());
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/debug/transactions") {
+    const secret = process.env["DEBUG_SECRET"];
+    if (!secret || url.searchParams.get("key") !== secret) {
+      sendJson(response, 403, { error: "Forbidden" });
+      return;
+    }
+    const txs = await getRecentTransactions();
+    sendJson(response, 200, { transactions: txs, merchantAddress: (await import("./ton.js")).MERCHANT_ADDRESS });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/debug/confirm-order") {
+    const secret = process.env["DEBUG_SECRET"];
+    if (!secret || url.searchParams.get("key") !== secret) {
+      sendJson(response, 403, { error: "Forbidden" });
+      return;
+    }
+    const data = await readJson(request);
+    const { confirmSeedOrder } = await import("./player.functions.js");
+    const result = await confirmSeedOrder({ data } as never);
+    sendJson(response, 200, result);
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/adsgram/reward") {
