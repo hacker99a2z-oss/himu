@@ -4,7 +4,7 @@ export type AdsgramInitOptions = {
   debugBannerType?: "RewardedVideo" | "FullscreenMedia";
 };
 
-export const ADSGRAM_TEST_BLOCK_ID = "int-41387";
+export const ADSGRAM_TEST_BLOCK_ID = " 54866";
 export const ADSGRAM_PRODUCTION_BLOCK_ID = "41655";
 
 /** Force a test rewarded creative only in development; production uses the live block. */
