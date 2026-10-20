@@ -88,7 +88,7 @@ function matchesPayment(tx: Tx, comment: string, minNano: bigint): boolean {
 /** Finds an incoming payment to the merchant wallet with this comment and at least minNano. */
 export async function findPayment(comment: string, minNano: bigint): Promise<string | null> {
   try {
-    const transactions = await getTransactions(200);
+    const transactions = await getTransactions(100);
     // Allow 2% slippage tolerance for wallet rounding.
     const min = (minNano * 98n) / 100n;
     const tx = transactions.find((t) => matchesPayment(t, comment, min));
@@ -113,7 +113,7 @@ export async function getRecentTransactions(): Promise<Tx[]> {
 /** Check whether a transaction hash matches the expected payment on the merchant wallet. */
 export async function verifyTransaction(txHash: string, expectedComment: string, minNano: bigint): Promise<boolean> {
   try {
-    const transactions = await getTransactions(200);
+    const transactions = await getTransactions(100);
     const normalizeHash = (value: string | undefined) => (value ?? "").replace(/^0x/i, "").toLowerCase();
     const tx = transactions.find((t) => normalizeHash(transactionHash(t) ?? undefined) === normalizeHash(txHash));
     if (!tx || !matchesPayment(tx, expectedComment, minNano)) return false;
