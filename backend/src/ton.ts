@@ -1,16 +1,25 @@
 import { Address } from "@ton/core";
 
 export const MERCHANT_ADDRESS = "UQBGUz_gEQHLm2NRt9D8Y6ZWh9b-20-EgNZxDNdrzQryX_AX";
-const TONAPI = "https://tonapi.io/v2";
+const TONCENTER = "https://toncenter.com/api/v2";
 
 const apiHeaders = (): Record<string, string> => {
   const key = process.env["TONCENTER_API_KEY"];
-  return key ? { "Authorization": `Bearer ${key}` } : {};
+  return key ? { "X-API-Key": key } : {};
 };
 
-/** Convert user-friendly address to raw format for API calls. */
-export function toRawAddress(userFriendly: string): string {
-  return Address.parse(userFriendly).toString({ bounceable: false });
+/** Convert a user-friendly or raw address to its canonical raw form. */
+export function toRawAddress(address: string): string {
+  return Address.parse(address).toRawString();
+}
+
+function sameAddress(a: string | undefined, b: string): boolean {
+  if (!a) return false;
+  try {
+    return toRawAddress(a) === toRawAddress(b);
+  } catch {
+    return false;
+  }
 }
 
 /** Live price of 1 Gram (TON) in USD. */
@@ -28,52 +37,86 @@ export async function getTonUsd(): Promise<number> {
   return p2;
 }
 
-type Tx = { hash: string; in_msg?: { value: string; message?: string; source?: string } };
+type TxMessage = {
+  hash?: string;
+  value?: string;
+  message?: string;
+  source?: string;
+  destination?: string;
+  message_decode_error?: string;
+};
+type Tx = {
+  hash?: string;
+  transaction_id?: { hash?: string; lt?: string };
+  in_msg?: TxMessage;
+};
+type TxResponse = { ok?: boolean; result?: Tx[]; error?: string };
 
-/** Finds an incoming payment to the merchant wallet with this comment and at least `minNano`. */
+async function getTransactions(limit: number): Promise<Tx[]> {
+  const query = new URLSearchParams({
+    address: MERCHANT_ADDRESS,
+    limit: String(limit),
+    archival: "true",
+  });
+  const r = await fetch(TONCENTER + "/getTransactions?" + query.toString(), { headers: apiHeaders() });
+  if (!r.ok) {
+    console.error("Toncenter fetch failed:", r.status, r.statusText);
+    return [];
+  }
+  const j = (await r.json()) as TxResponse;
+  if (j.ok !== true || !Array.isArray(j.result)) {
+    console.error("Toncenter transaction response invalid:", j.error ?? "missing result");
+    return [];
+  }
+  return j.result;
+}
+
+function transactionHash(tx: Tx): string | null {
+  return tx.transaction_id?.hash ?? tx.hash ?? null;
+}
+
+function matchesPayment(tx: Tx, comment: string, minNano: bigint): boolean {
+  const msg = tx.in_msg;
+  if (!msg || msg.message !== comment || !sameAddress(msg.destination, MERCHANT_ADDRESS)) return false;
+  try {
+    return BigInt(msg.value || "0") >= minNano;
+  } catch {
+    return false;
+  }
+}
+
+/** Finds an incoming payment to the merchant wallet with this comment and at least minNano. */
 export async function findPayment(comment: string, minNano: bigint): Promise<string | null> {
   try {
-    const r = await fetch(`${TONAPI}/blockchain/accounts/${MERCHANT_ADDRESS}/transactions?limit=200`, { headers: apiHeaders() });
-    if (!r.ok) {
-      console.error("Tonapi fetch failed:", r.status, r.statusText);
-      return null;
-    }
-    const j = (await r.json()) as { transactions?: Tx[] };
-    // allow 2% slippage tolerance for wallet rounding
+    const transactions = await getTransactions(200);
+    // Allow 2% slippage tolerance for wallet rounding.
     const min = (minNano * 98n) / 100n;
-    const tx = j.transactions?.find((t) => t.in_msg?.message === comment && BigInt(t.in_msg.value || "0") >= min);
-    if (tx) {
-      console.log("Payment found:", tx.hash, "comment:", comment, "value:", tx.in_msg?.value);
+    const tx = transactions.find((t) => matchesPayment(t, comment, min));
+    const hash = tx ? transactionHash(tx) : null;
+    if (tx && hash) {
+      console.log("Payment found:", hash, "comment:", comment, "value:", tx.in_msg?.value);
     } else {
-      console.log("Payment not found for comment:", comment, "searched", j.transactions?.length, "transactions");
+      console.log("Payment not found for comment:", comment, "searched", transactions.length, "transactions");
     }
-    return tx ? tx.hash : null;
+    return hash;
   } catch (e) {
     console.error("Error finding payment:", e);
     return null;
   }
 }
 
-/** Debug: Returns recent transactions from merchant wallet. */
+/** Debug: Returns recent transactions from the merchant wallet. */
 export async function getRecentTransactions(): Promise<Tx[]> {
-  const r = await fetch(`${TONAPI}/blockchain/accounts/${MERCHANT_ADDRESS}/transactions?limit=20`, { headers: apiHeaders() });
-  if (!r.ok) return [];
-  const j = (await r.json()) as { transactions?: Tx[] };
-  return j.transactions ?? [];
+  return getTransactions(20);
 }
 
-/** Check if a specific transaction hash exists and matches the expected criteria. */
+/** Check whether a transaction hash matches the expected payment on the merchant wallet. */
 export async function verifyTransaction(txHash: string, expectedComment: string, minNano: bigint): Promise<boolean> {
   try {
-    const r = await fetch(`${TONAPI}/blockchain/transactions/${txHash}`, { headers: apiHeaders() });
-    if (!r.ok) return false;
-    const j = await r.json() as { in_msg?: { value: string; message?: string; destination?: { address: string } } };
-    const msg = j.in_msg;
-    if (!msg) return false;
-    const rawAddress = toRawAddress(MERCHANT_ADDRESS);
-    if (msg.destination?.address !== rawAddress) return false;
-    if (msg.message !== expectedComment) return false;
-    if (BigInt(msg.value || "0") < minNano) return false;
+    const transactions = await getTransactions(200);
+    const normalizeHash = (value: string | undefined) => (value ?? "").replace(/^0x/i, "").toLowerCase();
+    const tx = transactions.find((t) => normalizeHash(transactionHash(t) ?? undefined) === normalizeHash(txHash));
+    if (!tx || !matchesPayment(tx, expectedComment, minNano)) return false;
     console.log("Transaction verified:", txHash);
     return true;
   } catch (e) {
