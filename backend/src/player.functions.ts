@@ -313,14 +313,18 @@ export const confirmSeedOrder = createServerFn({ method: "POST" })
 
     let hash: string | null = null;
     if (data.txHash) {
-      // Manual confirmation with transaction hash
-      const { verifyTransaction } = await import("./ton.js");
+      // First try the hash supplied by the wallet.
+      const { verifyTransaction, findPayment } = await import("./ton.js");
       const verified = await verifyTransaction(data.txHash, order.comment, BigInt(order.nano));
       if (verified) {
         hash = data.txHash;
+      } else {
+        // Some wallets return an external-message hash, not the merchant transaction hash.
+        // Confirm using the unique server-generated order comment and amount instead.
+        hash = await findPayment(order.comment, BigInt(order.nano));
       }
     } else {
-      // Automatic confirmation via comment search
+      // Automatic confirmation via the unique order comment.
       const { findPayment } = await import("./ton.js");
       hash = await findPayment(order.comment, BigInt(order.nano));
     }
