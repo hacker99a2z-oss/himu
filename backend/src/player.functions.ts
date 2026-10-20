@@ -347,7 +347,7 @@ export const confirmSeedOrder = createServerFn({ method: "POST" })
 export const withdraw = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => {
     const o = initOnly(d) as { initData: string; cents?: unknown; address?: unknown };
-    if (!Number.isInteger(o.cents) || (o.cents as number) < MIN_WITHDRAW_CENTS || (o.cents as number) > 10_000_000) throw new Error("Minimum withdraw is $0.10");
+    if (!Number.isInteger(o.cents) || (o.cents as number) < MIN_WITHDRAW_CENTS || (o.cents as number) > 10_000_000) throw new Error("Minimum withdraw is $0.03");
     if (typeof o.address !== "string" || o.address.length > 100) throw new Error("Connect your Tonkeeper wallet");
     return o as { initData: string; cents: number; address: string };
   })
