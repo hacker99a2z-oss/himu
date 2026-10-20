@@ -11,7 +11,7 @@ export const CROP_RULES: Record<CropKey, { adsNeed: number; sellCents: number; s
   pumpkin: { adsNeed: 45, sellCents: 5, seedPrice10: 4.5 },
 };
 
-export const MIN_WITHDRAW_CENTS = 10;
+export const MIN_WITHDRAW_CENTS = 3;
 export const REFERRAL_PERCENT = 20;
 export const MIN_SEED_BUY = 10;
 export const MAX_SEED_BUY = 1_000_000;
