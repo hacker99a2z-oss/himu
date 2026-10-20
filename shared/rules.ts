@@ -35,7 +35,7 @@ export const referralRewardCents = (paidCents: number) => Math.floor((paidCents 
 export const tonNanoForUsd = (cents: number, tonUsd: number) => BigInt(Math.ceil(((cents / 100) / tonUsd) * 1e9));
 
 /** Wheat and corn are free; the rest unlock once (price in cents) and then have unlimited seeds. */
-export const UNLOCK_CENTS: Partial<Record<CropKey, number>> = { carrot: 1, tomato: 40, pumpkin: 50 };
+export const UNLOCK_CENTS: Partial<Record<CropKey, number>> = { carrot: 30, tomato: 40, pumpkin: 50 };
 export const isLockable = (k: CropKey) => UNLOCK_CENTS[k] !== undefined;
 export const isUnlocked = (k: CropKey, unlocked?: Partial<Record<CropKey, boolean>>) => !isLockable(k) || !!unlocked?.[k];
 
