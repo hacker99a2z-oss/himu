@@ -137,10 +137,10 @@
   background: var(--gradient-primary);
   color: var(--color-primary-foreground);
   box-shadow: var(--shadow-pop);
-  text-shadow: 0 1px 0 oklch(0.3 0.1 140 / 0.55);
+  text-shadow: none;
   font-family: var(--font-display);
   font-size: clamp(0.59375rem, 2.6vw, 0.6875rem);
-  font-weight: 800;
+  font-weight: 500;
   line-height: 1.15;
   letter-spacing: 0.01em;
   text-align: center;
@@ -149,6 +149,12 @@
   &:active { transform: translateY(3px); box-shadow: 0 1px 0 0 oklch(0.4 0.1 140 / 0.35); }
   &:disabled { opacity: 0.85; filter: saturate(0.55); cursor: not-allowed; }
   &:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
+}
+
+@utility btn-ad-single-line {
+  white-space: nowrap;
+  font-size: 0.56rem;
+  letter-spacing: 0;
 }
 
 @utility btn-gold {
