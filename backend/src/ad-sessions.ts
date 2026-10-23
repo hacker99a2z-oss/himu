@@ -98,6 +98,24 @@ export async function startAdSession(input: unknown) {
     }
   }
 
+  // Sessions created by the older client/backend contract had no phase marker.
+  // In that version, the frontend rejected the new session because its target was
+  // missing and never called AdsGram, leaving a guaranteed-stale pending record.
+  // Cancel these legacy reservations before looking for an active session.
+  const legacySession = await sessions.updateOne(
+    { _id: tg.id, status: "pending", phase: { $exists: false } },
+    {
+      $set: {
+        status: "cancelled",
+        cancelledAt: now,
+        cancelReason: "legacy_session_never_started",
+      },
+    },
+  );
+  if (legacySession.modifiedCount) {
+    console.info("[adsgram] Removed legacy pending session created before playback tracking");
+  }
+
   await sessions.updateOne(
     {
       _id: tg.id,
