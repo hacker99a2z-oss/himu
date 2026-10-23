@@ -40,10 +40,16 @@ export const gameApi = {
     request<{ paid: boolean; player: PlayerView | null }>("/api/orders/confirm", { initData, orderId, txHash }),
   withdrawalLinks: () =>
     request<{ paymentsProof: string | null; contactSupport: string | null }>("/api/withdrawal-links"),
-  startAdSession: (initData: string, crop: CropKey, part: number, target: "field" | "contest" = "field") =>
+  startAdSession: (
+    initData: string,
+    crop: CropKey,
+    part: number,
+    target: "field" | "contest" = "field",
+    abandonSessionId?: string,
+  ) =>
     request<{ sessionId: string; resumed: boolean; crop: CropKey; part: number; target: "field" | "contest" }>(
       "/api/ads/session/start",
-      { initData, crop, part, target },
+      { initData, crop, part, target, ...(abandonSessionId ? { abandonSessionId } : {}) },
     ),
   getAdSessionStatus: (initData: string, sessionId: string) =>
     request<{ verified: boolean; expired: boolean; player: PlayerView | null }>("/api/ads/session/status", {
