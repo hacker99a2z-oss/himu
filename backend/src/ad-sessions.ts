@@ -184,7 +184,7 @@ export async function startAdSession(input: unknown) {
           createdAt: now,
           expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
         },
-        $unset: { startedAt: "" },
+        $unset: { startedAt: "", verifiedAt: "", cancelledAt: "", cancelReason: "" },
       },
       { upsert: true },
     );
@@ -268,7 +268,10 @@ export async function getAdSessionStatus(input: unknown) {
     );
     return { verified: false, expired: true, player: null };
   }
-  if (session.status !== "verified") return { verified: false, expired: session.status === "expired", player: null };
+  if (session.status !== "verified") {
+    // A cancelled session is terminal too; don't leave the client polling it as pending.
+    return { verified: false, expired: session.status === "expired" || session.status === "cancelled", player: null };
+  }
   return { verified: true, expired: false, player: await loadPlayer({ data: { initData: data.initData } }) };
 }
 
