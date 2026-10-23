@@ -93,7 +93,6 @@ function showAdWithStartupTimeout(controller: AdController, onStart?: () => void
   };
 
   controller.addEventListener("onStart", handleStart);
-  const showPromise = controller.show();
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
       if (started) return;
@@ -101,6 +100,15 @@ function showAdWithStartupTimeout(controller: AdController, onStart?: () => void
       reject({ description: "Ad loading timed out", state: "load", error: true });
     }, timeoutMs);
   });
+
+  let showPromise: Promise<AdsgramShowResult>;
+  try {
+    showPromise = controller.show();
+  } catch (error) {
+    if (timeout) clearTimeout(timeout);
+    controller.removeEventListener?.("onStart", handleStart);
+    return Promise.reject(error);
+  }
 
   return Promise.race([showPromise, timeoutPromise]).finally(() => {
     if (timeout) clearTimeout(timeout);
