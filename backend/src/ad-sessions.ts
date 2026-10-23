@@ -163,10 +163,10 @@ export async function startAdSession(input: unknown) {
           round,
           status: "pending",
           phase: "reserved",
-          startedAt: undefined,
           createdAt: now,
           expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
         },
+        $unset: { startedAt: "" },
       },
       { upsert: true },
     );
