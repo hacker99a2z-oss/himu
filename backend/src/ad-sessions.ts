@@ -99,6 +99,7 @@ export async function startAdSession(input: unknown) {
       resumed: true,
       crop: activeSession.crop,
       part: activeSession.part,
+      target: activeSession.target ?? "field",
     };
   }
 
@@ -151,6 +152,7 @@ export async function startAdSession(input: unknown) {
           resumed: true,
           crop: racedSession.crop,
           part: racedSession.part,
+          target: racedSession.target ?? "field",
         };
       }
     }

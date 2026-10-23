@@ -41,7 +41,7 @@ export const gameApi = {
   withdrawalLinks: () =>
     request<{ paymentsProof: string | null; contactSupport: string | null }>("/api/withdrawal-links"),
   startAdSession: (initData: string, crop: CropKey, part: number, target: "field" | "contest" = "field") =>
-    request<{ sessionId: string; resumed: boolean; crop: CropKey; part: number }>(
+    request<{ sessionId: string; resumed: boolean; crop: CropKey; part: number; target: "field" | "contest" }>(
       "/api/ads/session/start",
       { initData, crop, part, target },
     ),
