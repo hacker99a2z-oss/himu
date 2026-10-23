@@ -4,23 +4,77 @@ import { useGame } from "./game";
 import { gameApi } from "./api";
 import type { CropKey } from "@shared/rules";
 
+type AdsgramShowResult = { done: boolean; description: string; state: string; error: boolean };
+type AdsgramEvent = "onStart";
 type AdController = {
-  show: () => Promise<{ done: boolean; description: string; state: string; error: boolean }>;
+  show: () => Promise<AdsgramShowResult>;
+  addEventListener?: (event: AdsgramEvent, callback: () => void) => void;
+  removeEventListener?: (event: AdsgramEvent, callback: () => void) => void;
+  destroy?: () => void;
 };
 
-// Prevent AdsGram's show() promise from leaving a server reservation pending forever.
-// If AdsGram never resolves (for example, the ad fails to load), treat it as a load failure.
-function showAdWithTimeout(controller: AdController, timeoutMs = 30000) {
-  let timeout: ReturnType<typeof setTimeout>;
-  return Promise.race([
-    controller.show(),
-    new Promise<never>((_, reject) => {
-      timeout = setTimeout(
-        () => reject({ description: "Ad loading timed out", state: "load", error: true }),
-        timeoutMs,
-      );
-    }),
-  ]).finally(() => clearTimeout(timeout!));
+const FAILED_SESSION_KEY_PREFIX = "adsgram:failed-session:";
+
+function failedSessionKey(userId: number | string) {
+  return `${FAILED_SESSION_KEY_PREFIX}${userId}`;
+}
+
+function readFailedSessionId(userId: number | string): string | undefined {
+  try {
+    const value = window.localStorage.getItem(failedSessionKey(userId));
+    return value && /^[a-f0-9]{32}$/.test(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberFailedSession(userId: number | string, sessionId: string) {
+  try {
+    window.localStorage.setItem(failedSessionKey(userId), sessionId);
+  } catch {
+    // Server TTL is the fallback if browser storage is unavailable.
+  }
+}
+
+function forgetFailedSession(userId: number | string, sessionId: string) {
+  try {
+    const key = failedSessionKey(userId);
+    if (window.localStorage.getItem(key) === sessionId) window.localStorage.removeItem(key);
+  } catch {
+    // Leaving the ID stored is safe: server cancellation is idempotent and session-specific.
+  }
+}
+
+/**
+ * Apply a timeout only while the SDK is still trying to load the first ad frame.
+ * Never time out a video after onStart: doing so could cancel a legitimate reward
+ * while the user is watching. AdsGram documents onStart and destroy on AdController.
+ */
+function showAdWithStartupTimeout(controller: AdController, onStart?: () => void, timeoutMs = 30000) {
+  if (!controller.addEventListener || !controller.removeEventListener) return controller.show();
+
+  let started = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const handleStart = () => {
+    started = true;
+    if (timeout) clearTimeout(timeout);
+    onStart?.();
+  };
+
+  controller.addEventListener("onStart", handleStart);
+  const showPromise = controller.show();
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      if (started) return;
+      try { controller.destroy?.(); } catch { /* continue cleanup */ }
+      reject({ description: "Ad loading timed out", state: "load", error: true });
+    }, timeoutMs);
+  });
+
+  return Promise.race([showPromise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+    controller.removeEventListener?.("onStart", handleStart);
+  });
 }
 
 function playbackErrorMessage(error: unknown): string {
@@ -86,12 +140,16 @@ export function useRewardedAd() {
       // AdsGram debug creatives are for playback testing only and never send a
       // reward callback, so do not reserve or poll a real crop-growth session.
       if (adsgramOptions.debug) {
-        const result = await showAdWithTimeout(AdControllerRef.current);
+        const result = await showAdWithStartupTimeout(AdControllerRef.current);
         if (!result.done) throw new Error(target === "contest" ? "Watch the ad till the end to get +1 point" : "Watch the ad till the end to speed up growth");
         return "test";
       }
 
-      const session = await gameApi.startAdSession(game.initData, crop, part, target);
+      // If an earlier ad failed before playback, make the backend cancel that exact
+      // reservation before it checks whether another session is already pending.
+      const failedSessionId = readFailedSessionId(game.user.id);
+      const session = await gameApi.startAdSession(game.initData, crop, part, target, failedSessionId);
+      if (failedSessionId) forgetFailedSession(game.user.id, failedSessionId);
       sessionId = session.sessionId;
 
       // AdsGram identifies callbacks by Telegram user ID, not session ID.
@@ -109,9 +167,15 @@ export function useRewardedAd() {
           const result = await showAdWithTimeout(AdControllerRef.current);
           if (!result.done) throw new Error(target === "contest" ? "Watch the ad till the end to get +1 point" : "Watch the ad till the end to speed up growth");
         } catch (error) {
-          // AdsGram rejects its show promise for skipped ads, playback errors,
-          // and no-fill responses. Release the reservation so the user can retry.
-          await gameApi.cancelAdSession(game.initData, sessionId).catch(() => undefined);
+          // Persist first. If this network call fails or the app closes, the next
+          // Watch Ads click will ask the backend to cancel this exact failed reservation.
+          rememberFailedSession(game.user.id, sessionId);
+          try {
+            await gameApi.cancelAdSession(game.initData, sessionId);
+            forgetFailedSession(game.user.id, sessionId);
+          } catch {
+            // Keep the stored ID for recovery on the next attempt.
+          }
           sessionId = undefined;
           throw new Error(playbackErrorMessage(error));
         }
