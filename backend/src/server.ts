@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { cancelAdSession, getAdSessionStatus, startAdSession, verifyAdsgramReward } from "./ad-sessions.js";
+import { cancelAdSession, getAdSessionStatus, markAdSessionStarted, startAdSession, verifyAdsgramReward } from "./ad-sessions.js";
 import { runPayouts } from "./payout.js";
 import {
   claimDaily,
@@ -202,6 +202,7 @@ async function route(request: IncomingMessage, response: ServerResponse, url: UR
     "/api/contest/enter": () => enterContest({ data } as never),
     "/api/orders/confirm": () => confirmSeedOrder({ data } as never),
     "/api/ads/session/start": () => startAdSession(data),
+    "/api/ads/session/started": () => markAdSessionStarted(data),
     "/api/ads/session/status": () => getAdSessionStatus(data),
     "/api/ads/session/cancel": () => cancelAdSession(data),
   };

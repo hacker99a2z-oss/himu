@@ -23,9 +23,14 @@ type AdSession = {
   target?: "field" | "contest";
   round?: number | undefined;
   status: "pending" | "verified" | "cancelled" | "expired";
+  /** "reserved" means the SDK hasn't reported that the first ad frame appeared. */
+  phase?: "reserved" | "playing";
+  startedAt?: Date;
   expiresAt: Date;
   createdAt: Date;
   verifiedAt?: Date;
+  cancelledAt?: Date;
+  cancelReason?: string;
 };
 
 type Player = {
@@ -38,20 +43,27 @@ type Player = {
 const isSessionExpired = (session: AdSession, now: number) =>
   session.expiresAt.getTime() <= now || session.createdAt.getTime() + SESSION_TTL_MS <= now;
 
-function validInput(input: unknown): input is { initData: string; crop: CropKey; part: number; target?: "field" | "contest" } {
+type StartAdInput = {
+  initData: string;
+  crop: CropKey;
+  part: number;
+  target?: "field" | "contest";
+  /** Only supplied when this browser knows that its previous attempt failed before reward. */
+  abandonSessionId?: string;
+};
+
+function validInput(input: unknown): input is StartAdInput {
   if (!input || typeof input !== "object") return false;
   const data = input as Record<string, unknown>;
-  if (data["target"] === "contest") return typeof data["initData"] === "string" && data["initData"].length <= 4096;
-  if (data["target"] !== undefined && data["target"] !== "field") return false;
+  if (typeof data["initData"] !== "string" || data["initData"].length > 4096) return false;
+  if (data["target"] !== undefined && data["target"] !== "field" && data["target"] !== "contest") return false;
+  if (data["abandonSessionId"] !== undefined &&
+      (typeof data["abandonSessionId"] !== "string" || !/^[a-f0-9]{32}$/.test(data["abandonSessionId"]))) return false;
+  if (data["target"] === "contest") return true;
   const crop = data["crop"];
   const part = data["part"];
-  return (
-    typeof data["initData"] === "string" &&
-    data["initData"].length <= 4096 &&
-    typeof crop === "string" &&
-    (CROP_KEYS as string[]).includes(crop) &&
-    isFieldPart(crop as CropKey, part)
-  );
+  return typeof crop === "string" && (CROP_KEYS as string[]).includes(crop) &&
+    isFieldPart(crop as CropKey, part);
 }
 
 function safeSecretEqual(actual: string, expected: string) {
@@ -72,6 +84,38 @@ export async function startAdSession(input: unknown) {
 
   const now = new Date();
   const sessions = db.collection<AdSession>("ad_sessions");
+
+  // A previous ad can fail before AdsGram displays anything. If the client could
+  // not reach the cancel endpoint at that moment, let the next click cancel only
+  // that exact session before we check for any other active session.
+  if (input.abandonSessionId) {
+    const abandoned = await sessions.updateOne(
+      { _id: tg.id, sessionId: input.abandonSessionId, status: "pending" },
+      { $set: { status: "cancelled", cancelledAt: now, cancelReason: "client_playback_failed" } },
+    );
+    if (abandoned.modifiedCount) {
+      console.info("[adsgram] Failed playback session cancelled on retry");
+    }
+  }
+
+  // Sessions created by the older client/backend contract had no phase marker.
+  // In that version, the frontend rejected the new session because its target was
+  // missing and never called AdsGram, leaving a guaranteed-stale pending record.
+  // Cancel these legacy reservations before looking for an active session.
+  const legacySession = await sessions.updateOne(
+    { _id: tg.id, status: "pending", phase: { $exists: false } },
+    {
+      $set: {
+        status: "cancelled",
+        cancelledAt: now,
+        cancelReason: "legacy_session_never_started",
+      },
+    },
+  );
+  if (legacySession.modifiedCount) {
+    console.info("[adsgram] Removed legacy pending session created before playback tracking");
+  }
+
   await sessions.updateOne(
     {
       _id: tg.id,
@@ -94,9 +138,13 @@ export async function startAdSession(input: unknown) {
     createdAt: { $gt: new Date(now.getTime() - SESSION_TTL_MS) },
   });
   if (activeSession) {
+    // Legacy sessions without phase are treated as already playing to avoid
+    // unexpectedly launching a second ad for an older session.
+    const phase = activeSession.phase ?? "playing";
     return {
       sessionId: activeSession.sessionId,
-      resumed: true,
+      resumed: phase === "playing",
+      phase,
       crop: activeSession.crop,
       part: activeSession.part,
       target: activeSession.target ?? "field",
@@ -132,9 +180,11 @@ export async function startAdSession(input: unknown) {
           target: isContest ? "contest" : "field",
           round,
           status: "pending",
+          phase: "reserved",
           createdAt: now,
           expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
         },
+        $unset: { startedAt: "", verifiedAt: "", cancelledAt: "", cancelReason: "" },
       },
       { upsert: true },
     );
@@ -147,9 +197,11 @@ export async function startAdSession(input: unknown) {
         createdAt: { $gt: new Date(now.getTime() - SESSION_TTL_MS) },
       });
       if (racedSession) {
+        const phase = racedSession.phase ?? "playing";
         return {
           sessionId: racedSession.sessionId,
-          resumed: true,
+          resumed: phase === "playing",
+          phase,
           crop: racedSession.crop,
           part: racedSession.part,
           target: racedSession.target ?? "field",
@@ -159,7 +211,7 @@ export async function startAdSession(input: unknown) {
     throw error;
   }
 
-  return { sessionId, resumed: false, crop, part };
+  return { sessionId, resumed: false, phase: "reserved" as const, crop, part, target: isContest ? "contest" as const : "field" as const };
 }
 
 export async function cancelAdSession(input: unknown) {
@@ -173,9 +225,26 @@ export async function cancelAdSession(input: unknown) {
   const db = await getDb();
   await db.collection<AdSession>("ad_sessions").updateOne(
     { _id: tg.id, sessionId: data.sessionId, status: "pending" },
-    { $set: { status: "cancelled" } },
+    { $set: { status: "cancelled", cancelledAt: new Date(), cancelReason: "client_playback_failed" } },
   );
   return { cancelled: true };
+}
+
+/** Mark a session as genuinely playing only after AdsGram reports onStart. */
+export async function markAdSessionStarted(input: unknown) {
+  if (!input || typeof input !== "object") throw new Error("Invalid ad request");
+  const data = input as { initData?: unknown; sessionId?: unknown };
+  if (typeof data.initData !== "string" || data.initData.length > 4096 ||
+      typeof data.sessionId !== "string" || !/^[a-f0-9]{32}$/.test(data.sessionId)) {
+    throw new Error("Invalid ad request");
+  }
+  const tg = await verifyInitData(data.initData);
+  const db = await getDb();
+  await db.collection<AdSession>("ad_sessions").updateOne(
+    { _id: tg.id, sessionId: data.sessionId, status: "pending" },
+    { $set: { phase: "playing", startedAt: new Date() } },
+  );
+  return { started: true };
 }
 
 export async function getAdSessionStatus(input: unknown) {
@@ -199,7 +268,10 @@ export async function getAdSessionStatus(input: unknown) {
     );
     return { verified: false, expired: true, player: null };
   }
-  if (session.status !== "verified") return { verified: false, expired: session.status === "expired", player: null };
+  if (session.status !== "verified") {
+    // A cancelled session is terminal too; don't leave the client polling it as pending.
+    return { verified: false, expired: session.status === "expired" || session.status === "cancelled", player: null };
+  }
   return { verified: true, expired: false, player: await loadPlayer({ data: { initData: data.initData } }) };
 }
 
