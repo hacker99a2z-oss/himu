@@ -1,2 +1,0 @@
-- [External package deployments](external-package-deploy.md) — keep lockfile download URLs publicly reachable; Replit-only package hosts break Render installs.
-- [AdsGram test and production blocks](adsgram-blocks.md) — keep the user-provided test block and production rewarded block separate; SDK debug suppresses reward callbacks.
