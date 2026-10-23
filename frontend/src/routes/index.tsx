@@ -220,15 +220,17 @@ function AdPanel({ k, part, active }: { k: CropKey; part: number; active: boolea
       </div>
       <button
         type="button"
-        className="btn-ad mt-1.5"
+        className={`btn-ad mt-1.5 ${k === "pumpkin" ? "btn-ad-single-line" : ""}`}
         disabled={!active || ad.loading || ad.left > 0}
         onClick={watch}
       >
-        <span className="flex min-h-[2.3em] flex-col justify-center">
+        <span className={k === "pumpkin" ? "flex min-h-[2.3em] items-center justify-center" : "flex min-h-[2.3em] flex-col justify-center"}>
           {ad.loading ? (
             <Loader2 className="mx-auto h-4 w-4 animate-spin" />
           ) : ad.left > 0 ? (
             <span>{ad.timer}</span>
+          ) : k === "pumpkin" ? (
+            <span>Watch Ads to Skip Time</span>
           ) : (
             <>
               <span>Watch Ads</span>
