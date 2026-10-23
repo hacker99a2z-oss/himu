@@ -26,6 +26,8 @@ type AdSession = {
   expiresAt: Date;
   createdAt: Date;
   verifiedAt?: Date;
+  cancelledAt?: Date;
+  cancelReason?: string;
 };
 
 type Player = {
@@ -38,20 +40,27 @@ type Player = {
 const isSessionExpired = (session: AdSession, now: number) =>
   session.expiresAt.getTime() <= now || session.createdAt.getTime() + SESSION_TTL_MS <= now;
 
-function validInput(input: unknown): input is { initData: string; crop: CropKey; part: number; target?: "field" | "contest" } {
+type StartAdInput = {
+  initData: string;
+  crop: CropKey;
+  part: number;
+  target?: "field" | "contest";
+  /** Only supplied when this browser knows that its previous attempt failed before reward. */
+  abandonSessionId?: string;
+};
+
+function validInput(input: unknown): input is StartAdInput {
   if (!input || typeof input !== "object") return false;
   const data = input as Record<string, unknown>;
-  if (data["target"] === "contest") return typeof data["initData"] === "string" && data["initData"].length <= 4096;
-  if (data["target"] !== undefined && data["target"] !== "field") return false;
+  if (typeof data["initData"] !== "string" || data["initData"].length > 4096) return false;
+  if (data["target"] !== undefined && data["target"] !== "field" && data["target"] !== "contest") return false;
+  if (data["abandonSessionId"] !== undefined &&
+      (typeof data["abandonSessionId"] !== "string" || !/^[a-f0-9]{32}$/.test(data["abandonSessionId"]))) return false;
+  if (data["target"] === "contest") return true;
   const crop = data["crop"];
   const part = data["part"];
-  return (
-    typeof data["initData"] === "string" &&
-    data["initData"].length <= 4096 &&
-    typeof crop === "string" &&
-    (CROP_KEYS as string[]).includes(crop) &&
-    isFieldPart(crop as CropKey, part)
-  );
+  return typeof crop === "string" && (CROP_KEYS as string[]).includes(crop) &&
+    isFieldPart(crop as CropKey, part);
 }
 
 function safeSecretEqual(actual: string, expected: string) {
@@ -72,6 +81,20 @@ export async function startAdSession(input: unknown) {
 
   const now = new Date();
   const sessions = db.collection<AdSession>("ad_sessions");
+
+  // A previous ad can fail before AdsGram displays anything. If the client could
+  // not reach the cancel endpoint at that moment, let the next click cancel only
+  // that exact session before we check for any other active session.
+  if (input.abandonSessionId) {
+    const abandoned = await sessions.updateOne(
+      { _id: tg.id, sessionId: input.abandonSessionId, status: "pending" },
+      { $set: { status: "cancelled", cancelledAt: now, cancelReason: "client_playback_failed" } },
+    );
+    if (abandoned.modifiedCount) {
+      console.info("[adsgram] Failed playback session cancelled on retry");
+    }
+  }
+
   await sessions.updateOne(
     {
       _id: tg.id,
@@ -159,7 +182,7 @@ export async function startAdSession(input: unknown) {
     throw error;
   }
 
-  return { sessionId, resumed: false, crop, part };
+  return { sessionId, resumed: false, crop, part, target: isContest ? "contest" as const : "field" as const };
 }
 
 export async function cancelAdSession(input: unknown) {
