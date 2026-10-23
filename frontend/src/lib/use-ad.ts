@@ -8,6 +8,21 @@ type AdController = {
   show: () => Promise<{ done: boolean; description: string; state: string; error: boolean }>;
 };
 
+// Prevent AdsGram's show() promise from leaving a server reservation pending forever.
+// If AdsGram never resolves (for example, the ad fails to load), treat it as a load failure.
+function showAdWithTimeout(controller: AdController, timeoutMs = 30000) {
+  let timeout: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    controller.show(),
+    new Promise<never>((_, reject) => {
+      timeout = setTimeout(
+        () => reject({ description: "Ad loading timed out", state: "load", error: true }),
+        timeoutMs,
+      );
+    }),
+  ]).finally(() => clearTimeout(timeout!));
+}
+
 function playbackErrorMessage(error: unknown): string {
   if (error && typeof error === "object") {
     const result = error as { description?: unknown; state?: unknown; error?: unknown };
@@ -71,7 +86,7 @@ export function useRewardedAd() {
       // AdsGram debug creatives are for playback testing only and never send a
       // reward callback, so do not reserve or poll a real crop-growth session.
       if (adsgramOptions.debug) {
-        const result = await AdControllerRef.current.show();
+        const result = await showAdWithTimeout(AdControllerRef.current);
         if (!result.done) throw new Error(target === "contest" ? "Watch the ad till the end to get +1 point" : "Watch the ad till the end to speed up growth");
         return "test";
       }
@@ -91,7 +106,7 @@ export function useRewardedAd() {
 
       if (!session.resumed) {
         try {
-          const result = await AdControllerRef.current.show();
+          const result = await showAdWithTimeout(AdControllerRef.current);
           if (!result.done) throw new Error(target === "contest" ? "Watch the ad till the end to get +1 point" : "Watch the ad till the end to speed up growth");
         } catch (error) {
           // AdsGram rejects its show promise for skipped ads, playback errors,
