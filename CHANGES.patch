@@ -1,0 +1,932 @@
+diff --git a/backend/src/ad-sessions.ts b/backend/src/ad-sessions.ts
+index f543789..d343fcb 100644
+--- a/backend/src/ad-sessions.ts
++++ b/backend/src/ad-sessions.ts
+@@ -9,7 +9,7 @@ import {
+   type CropKey,
+ } from "../../shared/rules.js";
+ import { getDb } from "./db.js";
+-import { loadPlayer } from "./player.functions.js";
++import { addGiveawayPoint, currentGiveawayRound, giveawayEntryId, loadPlayer } from "./player.functions.js";
+ import { verifyInitData } from "./tg.js";
+ 
+ const SESSION_TTL_MS = 5 * 60 * 1000;
+@@ -19,6 +19,9 @@ type AdSession = {
+   sessionId: string;
+   crop: CropKey;
+   part: number;
++  /** "contest" = Giveaways "1 Ad = +1" button; missing/"field" = speed up a field. */
++  target?: "field" | "contest";
++  round?: number | undefined;
+   status: "pending" | "verified" | "cancelled" | "expired";
+   expiresAt: Date;
+   createdAt: Date;
+@@ -35,9 +38,11 @@ type Player = {
+ const isSessionExpired = (session: AdSession, now: number) =>
+   session.expiresAt.getTime() <= now || session.createdAt.getTime() + SESSION_TTL_MS <= now;
+ 
+-function validInput(input: unknown): input is { initData: string; crop: CropKey; part: number } {
++function validInput(input: unknown): input is { initData: string; crop: CropKey; part: number; target?: "field" | "contest" } {
+   if (!input || typeof input !== "object") return false;
+   const data = input as Record<string, unknown>;
++  if (data["target"] === "contest") return typeof data["initData"] === "string" && data["initData"].length <= 4096;
++  if (data["target"] !== undefined && data["target"] !== "field") return false;
+   const crop = data["crop"];
+   const part = data["part"];
+   return (
+@@ -100,9 +105,19 @@ export async function startAdSession(input: unknown) {
+   if (player.lastAdAt && player.lastAdAt.getTime() + AD_COOLDOWN_MS > now.getTime()) {
+     throw new Error("Please wait for the timer to finish");
+   }
+-  const field = fieldParts(input.crop, player.fields?.[input.crop] as never)[input.part];
+-  if (!field?.planted) throw new Error("Plant a seed first");
+-  if (isReady(input.crop, field, now.getTime())) throw new Error("Already fully grown — tap to harvest");
++  const isContest = input.target === "contest";
++  let round: number | undefined;
++  if (isContest) {
++    round = await currentGiveawayRound(db as never);
++    const entry = await db.collection<{ _id: string }>("giveaway_entries").findOne({ _id: giveawayEntryId(round, tg.id) });
++    if (!entry) throw new Error("Join the giveaway first");
++  } else {
++    const field = fieldParts(input.crop, player.fields?.[input.crop] as never)[input.part];
++    if (!field?.planted) throw new Error("Plant a seed first");
++    if (isReady(input.crop, field, now.getTime())) throw new Error("Already fully grown — tap to harvest");
++  }
++  const crop: CropKey = isContest ? "wheat" : input.crop;
++  const part = isContest ? 0 : input.part;
+ 
+   const sessionId = crypto.randomUUID().replace(/-/g, "");
+   try {
+@@ -111,8 +126,10 @@ export async function startAdSession(input: unknown) {
+       {
+         $set: {
+           sessionId,
+-          crop: input.crop,
+-          part: input.part,
++          crop,
++          part,
++          target: isContest ? "contest" : "field",
++          round,
+           status: "pending",
+           createdAt: now,
+           expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
+@@ -140,7 +157,7 @@ export async function startAdSession(input: unknown) {
+     throw error;
+   }
+ 
+-  return { sessionId, resumed: false, crop: input.crop, part: input.part };
++  return { sessionId, resumed: false, crop, part };
+ }
+ 
+ export async function cancelAdSession(input: unknown) {
+@@ -241,6 +258,30 @@ export async function verifyAdsgramReward(userId: string | null, suppliedSecret:
+       console.warn("[adsgram] Reward callback rejected: ad cooldown is active");
+       return { status: 429, message: "Ad cooldown active" };
+     }
++    if (session.target === "contest") {
++      const round = session.round ?? 0;
++      const entry = await db.collection<{ _id: string }>("giveaway_entries").findOne({ _id: giveawayEntryId(round, telegramId) });
++      if (!entry) {
++        console.warn("[adsgram] Reward callback rejected: player is not in this giveaway round");
++        return { status: 409, message: "Giveaway round is no longer open" };
++      }
++      const update = await players.updateOne(
++        {
++          _id: telegramId,
++          lastAdAt: player.lastAdAt ?? { $exists: false },
++          lastAdSessionId: player.lastAdSessionId ?? { $exists: false },
++        } as never,
++        { $set: { lastAdAt: new Date(now), lastAdSessionId: session.sessionId } },
++      );
++      if (!update.modifiedCount) continue;
++      await addGiveawayPoint(db as never, round, telegramId);
++      await sessions.updateOne(
++        { _id: telegramId, sessionId: session.sessionId, status: "pending" },
++        { $set: { status: "verified", verifiedAt: new Date(now) } },
++      );
++      console.info("[adsgram] Giveaway reward callback accepted");
++      return { status: 200, message: "Verified" };
++    }
+     if (!CROP_KEYS.includes(session.crop) || !isFieldPart(session.crop, session.part)) {
+       console.warn("[adsgram] Reward callback rejected: invalid crop or field part in session");
+       return { status: 400, message: "Invalid ad session" };
+diff --git a/backend/src/player.functions.ts b/backend/src/player.functions.ts
+index 42433c4..93a73f3 100644
+--- a/backend/src/player.functions.ts
++++ b/backend/src/player.functions.ts
+@@ -25,12 +25,11 @@ import {
+   UNLOCK_CENTS,
+   isUnlocked,
+   isLockable,
+-  CONTEST_ENTRY_CENTS,
+   CONTEST_SHOWN,
+-  CONTEST_PRIZE_WEIGHTS,
++  GIVEAWAY_DISTRIBUTION_CENTS,
++  GIVEAWAY_ENTRY_CROP,
++  GIVEAWAY_GOAL_POINTS,
+   contestPrizeCents,
+-  weekKey,
+-  weekEnd,
+ } from "../../shared/rules.js";
+ 
+ type PlayerDoc = {
+@@ -239,11 +238,6 @@ export const sellCrops = createServerFn({ method: "POST" })
+       { returnDocument: "after" },
+     );
+     if (!res) throw new Error("Not enough crops");
+-    // Weekly contest ranking counts dollars earned from selling this week.
+-    await db.collection<{ _id: string }>("contest_entries").updateOne(
+-      { _id: `${weekKey(Date.now())}:${tg.id}` },
+-      { $inc: { soldCents: earn } },
+-    );
+     return { earnedCents: earn, player: await view(db, res) };
+   });
+ 
+@@ -379,44 +373,84 @@ export const withdraw = createServerFn({ method: "POST" })
+     return { player: await view(db, (await players.findOne({ _id: tg.id }))!) };
+   });
+ 
+-type EntryDoc = { _id: string; week: string; telegramId: number; name: string; soldCents: number; joinedAt: Date };
+-type ContestDoc = { _id: string; entrants: number; settled?: boolean };
++type Db = Awaited<ReturnType<typeof ctx>>["db"];
++export type GiveawayEntryDoc = { _id: string; round: number; telegramId: number; name: string; points: number; joinedAt: Date; rank?: number; prizeCents?: number };
++type GiveawayRoundDoc = { _id: string; round: number; points: number; entrants: number; settled?: boolean };
++type GiveawayStateDoc = { _id: "state"; round: number };
+ 
+-/** Pays out every finished week that has not been settled yet (idempotent, first caller wins). */
+-async function settleFinishedWeeks(db: Awaited<ReturnType<typeof ctx>>["db"]) {
+-  const contests = db.collection<ContestDoc>("contests");
+-  const current = weekKey(Date.now());
+-  const open = await contests.find({ _id: { $lt: current }, settled: { $ne: true } }).toArray();
+-  for (const c of open) {
+-    const lock = await contests.updateOne({ _id: c._id, settled: { $ne: true } }, { $set: { settled: true, settledAt: new Date() } });
+-    if (!lock.modifiedCount) continue;
+-    const pool = c.entrants * CONTEST_ENTRY_CENTS;
+-    const top = await db.collection<EntryDoc>("contest_entries").find({ week: c._id }).sort({ soldCents: -1, joinedAt: 1 }).limit(CONTEST_PRIZE_WEIGHTS.length).toArray();
+-    for (const [i, e] of top.entries()) {
+-      const prize = contestPrizeCents(i + 1, pool, top.length);
+-      if (prize > 0) await db.collection<PlayerDoc>("players").updateOne({ _id: e.telegramId }, { $inc: { balanceCents: prize } });
+-      await db.collection<EntryDoc>("contest_entries").updateOne({ _id: e._id }, { $set: { rank: i + 1, prizeCents: prize } as never });
+-    }
++const roundId = (round: number) => `r${round}`;
++export const giveawayEntryId = (round: number, telegramId: number) => `${round}:${telegramId}`;
++
++/** Current open giveaway round number (starts at 1). */
++export async function currentGiveawayRound(db: Db): Promise<number> {
++  const state = await db.collection<GiveawayStateDoc>("giveaway_state").findOne({ _id: "state" });
++  return state?.round ?? 1;
++}
++
++/** Distributes the round to ALL entrants by rank once the goal is reached, then opens the next round (idempotent). */
++async function settleRound(db: Db, round: number) {
++  const rounds = db.collection<GiveawayRoundDoc>("giveaway_rounds");
++  const lock = await rounds.updateOne(
++    { _id: roundId(round), settled: { $ne: true }, points: { $gte: GIVEAWAY_GOAL_POINTS } },
++    { $set: { settled: true, settledAt: new Date() } as never },
++  );
++  if (!lock.modifiedCount) return;
++  await db.collection<GiveawayStateDoc>("giveaway_state").updateOne(
++    { _id: "state", round: { $lte: round } } as never,
++    { $set: { round: round + 1 } },
++    { upsert: true },
++  ).catch(() => undefined);
++  const entries = db.collection<GiveawayEntryDoc>("giveaway_entries");
++  const all = await entries.find({ round }).sort({ points: -1, joinedAt: 1 }).toArray();
++  for (const [i, e] of all.entries()) {
++    const prize = contestPrizeCents(i + 1, GIVEAWAY_DISTRIBUTION_CENTS, all.length);
++    if (prize > 0) await db.collection<PlayerDoc>("players").updateOne({ _id: e.telegramId }, { $inc: { balanceCents: prize } });
++    await entries.updateOne({ _id: e._id }, { $set: { rank: i + 1, prizeCents: prize } });
+   }
+ }
+ 
+-async function contestView(db: Awaited<ReturnType<typeof ctx>>["db"], me: number): Promise<ContestView> {
+-  const now = Date.now();
+-  const week = weekKey(now);
+-  const c = await db.collection<ContestDoc>("contests").findOne({ _id: week });
+-  const entrants = c?.entrants ?? 0;
+-  const pool = entrants * CONTEST_ENTRY_CENTS;
+-  const entries = db.collection<EntryDoc>("contest_entries");
+-  const entered = !!(await entries.findOne({ _id: `${week}:${me}` }));
+-  const top = entered ? await entries.find({ week }).sort({ soldCents: -1, joinedAt: 1 }).limit(CONTEST_SHOWN).toArray() : [];
++/** Called after a verified "1 Ad = +1" reward: adds the point and distributes the round when the goal is hit. */
++export async function addGiveawayPoint(db: Db, round: number, telegramId: number) {
++  const entries = db.collection<GiveawayEntryDoc>("giveaway_entries");
++  const res = await entries.updateOne({ _id: giveawayEntryId(round, telegramId) }, { $inc: { points: 1 } });
++  if (!res.modifiedCount) return;
++  const r = await db.collection<GiveawayRoundDoc>("giveaway_rounds").findOneAndUpdate(
++    { _id: roundId(round) },
++    { $inc: { points: 1 } },
++    { returnDocument: "after", upsert: true },
++  );
++  if (r && r.points >= GIVEAWAY_GOAL_POINTS) await settleRound(db, round);
++}
++
++async function contestView(db: Db, me: number): Promise<ContestView> {
++  const round = await currentGiveawayRound(db);
++  const r = await db.collection<GiveawayRoundDoc>("giveaway_rounds").findOne({ _id: roundId(round) });
++  const entrants = r?.entrants ?? 0;
++  const entries = db.collection<GiveawayEntryDoc>("giveaway_entries");
++  const entered = !!(await entries.findOne({ _id: giveawayEntryId(round, me) }));
++  const top = await entries.find({ round }).sort({ points: -1, joinedAt: 1 }).limit(CONTEST_SHOWN).toArray();
++  const rows = top.map((e, i) => ({
++    rank: i + 1,
++    name: e.name,
++    points: e.points,
++    prizeCents: contestPrizeCents(i + 1, GIVEAWAY_DISTRIBUTION_CENTS, entrants),
++    me: e.telegramId === me,
++  }));
++  // Always show the player's own row even when they are outside the first CONTEST_SHOWN.
++  if (entered && !rows.some((x) => x.me)) {
++    const mine = (await entries.findOne({ _id: giveawayEntryId(round, me) }))!;
++    const ahead = await entries.countDocuments({ round, $or: [{ points: { $gt: mine.points } }, { points: mine.points, joinedAt: { $lt: mine.joinedAt } }] });
++    rows.push({ rank: ahead + 1, name: mine.name, points: mine.points, prizeCents: contestPrizeCents(ahead + 1, GIVEAWAY_DISTRIBUTION_CENTS, entrants), me: true });
++  }
+   return {
+-    week,
+-    endsAt: weekEnd(now),
+-    serverNow: now,
+-    poolCents: pool,
++    round,
++    serverNow: Date.now(),
++    goalPoints: GIVEAWAY_GOAL_POINTS,
++    totalPoints: Math.min(GIVEAWAY_GOAL_POINTS, r?.points ?? 0),
++    distributionCents: GIVEAWAY_DISTRIBUTION_CENTS,
+     entered,
+     entrants,
+-    rows: top.map((e, i) => ({ rank: i + 1, name: e.name, soldCents: e.soldCents, prizeCents: contestPrizeCents(i + 1, pool, entrants), me: e.telegramId === me })),
++    rows,
+   };
+ }
+ 
+@@ -424,30 +458,28 @@ export const loadContest = createServerFn({ method: "POST" })
+   .inputValidator(initOnly)
+   .handler(async ({ data }) => {
+     const { tg, db } = await ctx(data.initData);
+-    await settleFinishedWeeks(db);
+     return contestView(db, tg.id);
+   });
+ 
+-/** Enter this week's contest by giving 1 harvested pumpkin; adds 5 cents to the pool. */
++/** Join the current giveaway round by giving 1 harvested corn. */
+ export const enterContest = createServerFn({ method: "POST" })
+   .inputValidator(initOnly)
+   .handler(async ({ data }) => {
+     const { tg, db, players } = await ctx(data.initData);
+-    await settleFinishedWeeks(db);
+-    const now = Date.now();
+-    const week = weekKey(now);
+-    const entries = db.collection<EntryDoc>("contest_entries");
+-    const id = `${week}:${tg.id}`;
++    const round = await currentGiveawayRound(db);
++    const entries = db.collection<GiveawayEntryDoc>("giveaway_entries");
++    const id = giveawayEntryId(round, tg.id);
++    const cropPath = `crops.${GIVEAWAY_ENTRY_CROP}`;
+     if (!(await entries.findOne({ _id: id }))) {
+-      const paid = await players.findOneAndUpdate({ _id: tg.id, "crops.pumpkin": { $gte: 1 } }, { $inc: { "crops.pumpkin": -1 } }, { returnDocument: "after" });
+-      if (!paid) throw new Error("You need 1 harvested pumpkin to enter");
++      const paid = await players.findOneAndUpdate({ _id: tg.id, [cropPath]: { $gte: 1 } }, { $inc: { [cropPath]: -1 } }, { returnDocument: "after" });
++      if (!paid) throw new Error("You need 1 harvested corn to join");
+       const name = [tg.first_name].filter(Boolean).join(" ") || (tg.username ? `@${tg.username}` : `Farmer ${tg.id}`);
+       try {
+-        await entries.insertOne({ _id: id, week, telegramId: tg.id, name, soldCents: 0, joinedAt: new Date(now) });
+-        await db.collection<ContestDoc>("contests").updateOne({ _id: week }, { $inc: { entrants: 1 } }, { upsert: true });
++        await entries.insertOne({ _id: id, round, telegramId: tg.id, name, points: 0, joinedAt: new Date() });
++        await db.collection<GiveawayRoundDoc>("giveaway_rounds").updateOne({ _id: roundId(round) }, { $inc: { entrants: 1 }, $setOnInsert: { round, points: 0 } }, { upsert: true });
+       } catch {
+-        // Concurrent double entry: give the pumpkin back.
+-        await players.updateOne({ _id: tg.id }, { $inc: { "crops.pumpkin": 1 } });
++        // Concurrent double entry: give the corn back.
++        await players.updateOne({ _id: tg.id }, { $inc: { [cropPath]: 1 } });
+       }
+     }
+     const player = await view(db, (await players.findOne({ _id: tg.id }))!);
+diff --git a/frontend/src/components/GameShell.tsx b/frontend/src/components/GameShell.tsx
+index b2cd3fb..8b640b8 100644
+--- a/frontend/src/components/GameShell.tsx
++++ b/frontend/src/components/GameShell.tsx
+@@ -5,9 +5,9 @@ import { useGame, money } from "@/lib/game";
+ 
+ const NAV = [
+   { to: "/refer", label: "Refer", icon: Share2 },
+-  { to: "/", label: "Home", icon: Home },
+   { to: "/market", label: "Market", icon: Store },
+-  { to: "/contest", label: "Contest", icon: Trophy },
++  { to: "/", label: "Home", icon: Home },
++  { to: "/contest", label: "Giveaways", icon: Trophy },
+   { to: "/withdraw", label: "Withdraw", icon: Wallet },
+ ] as const;
+ 
+diff --git a/frontend/src/lib/api.ts b/frontend/src/lib/api.ts
+index 38af28e..5f65838 100644
+--- a/frontend/src/lib/api.ts
++++ b/frontend/src/lib/api.ts
+@@ -40,10 +40,10 @@ export const gameApi = {
+     request<{ paid: boolean; player: PlayerView | null }>("/api/orders/confirm", { initData, orderId, txHash }),
+   withdrawalLinks: () =>
+     request<{ paymentsProof: string | null; contactSupport: string | null }>("/api/withdrawal-links"),
+-  startAdSession: (initData: string, crop: CropKey, part: number) =>
++  startAdSession: (initData: string, crop: CropKey, part: number, target: "field" | "contest" = "field") =>
+     request<{ sessionId: string; resumed: boolean; crop: CropKey; part: number }>(
+       "/api/ads/session/start",
+-      { initData, crop, part },
++      { initData, crop, part, target },
+     ),
+   getAdSessionStatus: (initData: string, sessionId: string) =>
+     request<{ verified: boolean; expired: boolean; player: PlayerView | null }>("/api/ads/session/status", {
+diff --git a/frontend/src/lib/use-ad.ts b/frontend/src/lib/use-ad.ts
+index e0e31f1..2f25521 100644
+--- a/frontend/src/lib/use-ad.ts
++++ b/frontend/src/lib/use-ad.ts
+@@ -58,6 +58,7 @@ export function useRewardedAd() {
+     crop: CropKey,
+     part: number,
+     onDone: (verifiedCrop: CropKey) => Promise<void>,
++    target: "field" | "contest" = "field",
+   ) => {
+     if (loading || left) return undefined;
+     if (!game.initData) throw new Error("Open the game inside Telegram");
+@@ -71,16 +72,16 @@ export function useRewardedAd() {
+       // reward callback, so do not reserve or poll a real crop-growth session.
+       if (adsgramOptions.debug) {
+         const result = await AdControllerRef.current.show();
+-        if (!result.done) throw new Error("Watch the ad till the end to speed up growth");
++        if (!result.done) throw new Error(target === "contest" ? "Watch the ad till the end to get +1 point" : "Watch the ad till the end to speed up growth");
+         return "test";
+       }
+ 
+-      const session = await gameApi.startAdSession(game.initData, crop, part);
++      const session = await gameApi.startAdSession(game.initData, crop, part, target);
+       sessionId = session.sessionId;
+       if (!session.resumed) {
+         try {
+           const result = await AdControllerRef.current.show();
+-          if (!result.done) throw new Error("Watch the ad till the end to speed up growth");
++          if (!result.done) throw new Error(target === "contest" ? "Watch the ad till the end to get +1 point" : "Watch the ad till the end to speed up growth");
+         } catch (error) {
+           // AdsGram rejects its show promise for skipped ads, playback errors,
+           // and no-fill responses. Release the reservation so the user can retry.
+diff --git a/frontend/src/routes/contest.tsx b/frontend/src/routes/contest.tsx
+index 302986c..16fd0ef 100644
+--- a/frontend/src/routes/contest.tsx
++++ b/frontend/src/routes/contest.tsx
+@@ -1,68 +1,54 @@
+ import { createFileRoute } from "@tanstack/react-router";
+-import { useCallback, useEffect, useMemo, useState } from "react";
++import { useCallback, useEffect, useState } from "react";
+ import { toast } from "sonner";
+-import { Loader2, Trophy } from "lucide-react";
++import { Gift, Loader2, PlayCircle } from "lucide-react";
+ import { GameShell } from "@/components/GameShell";
++import { Button } from "@/components/ui/button";
+ import { gameApi } from "@/lib/api";
+ import { CROPS, haptic, money, useGame } from "@/lib/game";
++import { useRewardedAd } from "@/lib/use-ad";
+ import type { ContestView } from "@shared/rules";
+ 
+ export const Route = createFileRoute("/contest")({
+   head: () => ({
+     meta: [
+-      { title: "Weekly Contest — Farm City" },
+-      { name: "description", content: "Enter the Farm City weekly contest with a pumpkin, sell the most and win the prize pool." },
+-      { property: "og:title", content: "Weekly Contest — Farm City" },
+-      { property: "og:description", content: "Top 10 sellers of the week share the prize pool." },
++      { title: "Giveaways — Farm City" },
++      { name: "description", content: "Join the Farm City giveaway with 1 corn, watch ads to earn points and share the prize by rank." },
++      { property: "og:title", content: "Giveaways — Farm City" },
++      { property: "og:description", content: "Every entrant wins a share of the giveaway, ranked by points." },
+       { property: "og:type", content: "website" },
+       { name: "twitter:card", content: "summary_large_image" },
+     ],
+   }),
+-  component: Contest,
++  component: Giveaways,
+ });
+ 
+-const fmtLeft = (ms: number) => {
+-  const s = Math.max(0, Math.floor(ms / 1000));
+-  const d = Math.floor(s / 86400);
+-  const h = Math.floor((s % 86400) / 3600);
+-  const m = Math.floor((s % 3600) / 60);
+-  return `${d}d ${String(h).padStart(2, "0")}h ${String(m).padStart(2, "0")}m ${String(s % 60).padStart(2, "0")}s`;
+-};
+-
+-// Preserve sub-cent shares in the contest display while leaving all other money displays unchanged.
++// Preserve sub-cent shares in the giveaway display while leaving all other money displays unchanged.
+ const prizeMoney = (cents: number) => `$${(cents / 100).toFixed(4).replace(/(\.\d{2})0+$/, "$1").replace(/(\.\d{3})0$/, "$1")}`;
+ 
+-function Contest() {
++function Giveaways() {
+   const game = useGame();
+   const [c, setC] = useState<ContestView | null>(null);
+   const [busy, setBusy] = useState(false);
+-  const [now, setNow] = useState(() => Date.now());
+-  const serverNow = c?.serverNow;
+-  const offset = useMemo(() => (serverNow ? serverNow - Date.now() : 0), [serverNow]);
++  const [dismissed, setDismissed] = useState(false);
+ 
+   const load = useCallback(() => {
+     if (!game.initData) return;
+-    gameApi.loadContest(game.initData).then(setC, (e) => toast.error(e instanceof Error ? e.message : "Could not load contest"));
++    gameApi.loadContest(game.initData).then(setC, (e) => toast.error(e instanceof Error ? e.message : "Could not load giveaways"));
+   }, [game.initData]);
+ 
+   useEffect(load, [load]);
+   useEffect(() => {
+-    const t = setInterval(() => setNow(Date.now()), 1000);
+-    // Refresh ranks and pool so prizes update when new players join.
++    // Refresh ranks, points and prizes so they update when others join or watch ads.
+     const r = setInterval(load, 20_000);
+-    return () => {
+-      clearInterval(t);
+-      clearInterval(r);
+-    };
++    return () => clearInterval(r);
+   }, [load]);
+ 
+-  const left = c ? c.endsAt - (now + offset) : 0;
+-  useEffect(() => {
+-    if (c && left <= 0) load();
+-  }, [c, left <= 0, load]); // eslint-disable-line react-hooks/exhaustive-deps
+-
+-  const pumpkins = game.state?.crops.pumpkin ?? 0;
++  const corn = game.state?.crops.corn ?? 0;
+   const entered = c?.entered ?? false;
++  const goal = c?.goalPoints ?? 2000;
++  const total = c?.totalPoints ?? 0;
++  const pct = Math.min(100, (total / goal) * 100);
+ 
+   const enter = async () => {
+     if (!game.initData) return void toast.error("Open the game inside Telegram");
+@@ -72,9 +58,9 @@ function Contest() {
+       const r = await gameApi.enterContest(game.initData);
+       setC(r.contest);
+       game.setState(r.player);
+-      toast.success("You joined this week's contest! 🏆");
++      toast.success("You joined the giveaway! 🎁");
+     } catch (e) {
+-      toast.error(e instanceof Error ? e.message : "Could not enter");
++      toast.error(e instanceof Error ? e.message : "Could not join");
+     } finally {
+       setBusy(false);
+     }
+@@ -82,68 +68,111 @@ function Contest() {
+ 
+   return (
+     <GameShell hideProfile>
+-      <div className="relative">
+-        <div className={entered ? "" : "pointer-events-none select-none blur-sm"} aria-hidden={!entered}>
+-          <section className="card-farm mb-4 overflow-hidden">
+-            <div className="relative bg-gold-gradient p-5 pb-10 text-gold-foreground">
+-              <div className="flex items-center gap-2">
+-                <Trophy className="h-6 w-6" />
+-                <h1 className="font-display text-2xl font-bold">Weekly Contest</h1>
+-              </div>
+-              <p className="mt-2 text-sm font-semibold">
+-                Time left: <span className="tabular-nums">{c ? fmtLeft(left) : "…"}</span>
+-              </p>
+-              <p className="absolute bottom-3 right-4 font-display text-2xl font-bold">{money(c?.poolCents ?? 0)}</p>
++      <section className="card-farm mb-4 overflow-hidden">
++        <div className="bg-gold-gradient p-5 text-gold-foreground">
++          <div className="flex items-center gap-2">
++            <Gift className="h-6 w-6" />
++            <h1 className="font-display text-2xl font-bold">Giveaways $$</h1>
++          </div>
++          <div className="mt-4 rounded-xl bg-background/85 p-3 text-foreground shadow-inner">
++            <div className="flex items-baseline justify-between">
++              <span className="text-[10px] font-extrabold tracking-wider text-muted-foreground">POINTS</span>
++              <span className="font-display text-lg font-bold tabular-nums">
++                {total}/{goal}
++              </span>
+             </div>
+-          </section>
+-
+-          <section className="card-farm p-3">
+-            <div className="mb-2 flex items-center justify-between px-1 text-xs font-bold text-muted-foreground">
+-              <span>Contesters</span>
+-              <span>Prize</span>
++            <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-secondary">
++              <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+             </div>
+-            <ol className="space-y-1.5">
+-              {(c?.rows.length ? c.rows : placeholderRows).map((r) => (
+-                <li
+-                  key={r.rank}
+-                  className={`flex items-center gap-2 rounded-xl px-3 py-2 ${r.me ? "bg-primary text-primary-foreground" : "bg-secondary"}`}
+-                >
+-                  <span className="w-6 font-display font-bold tabular-nums">{r.rank}</span>
+-                  <span className="min-w-0 flex-1">
+-                    <span className="block truncate text-sm font-semibold">{r.name}</span>
+-                    <span className="block text-[10px] font-bold opacity-70">Sold {money(r.soldCents)}</span>
+-                  </span>
+-                  <span className="font-display text-sm font-bold tabular-nums">{r.prizeCents > 0 ? `+${prizeMoney(r.prizeCents)}` : "—"}</span>
+-                </li>
+-              ))}
+-            </ol>
+-            <p className="mt-3 text-center text-[11px] text-muted-foreground">
+-              Ranked by $ earned selling crops this week. Top 10 share the pool when the timer ends.
+-            </p>
+-          </section>
++          </div>
+         </div>
++      </section>
+ 
+-        {c && !entered && (
+-          <div className="absolute inset-x-0 top-24 z-10 flex justify-center px-4">
+-            <div className="card-farm w-full max-w-xs p-5 text-center">
+-              <img src={CROPS.pumpkin.image} alt="" className="mx-auto h-14 w-14" />
+-              <p className="mt-2 font-display text-lg font-bold">Enter with 1 pumpkin</p>
+-              <p className="text-sm text-muted-foreground">Give 1 harvested pumpkin to join this week's contest.</p>
+-              <p className="mt-1 text-xs font-bold">You have {pumpkins} 🎃</p>
+-              <button className="btn-game btn-gold mt-3 w-full" disabled={busy || pumpkins < 1} onClick={enter}>
+-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Give 1 🎃 & Enter"}
+-              </button>
+-            </div>
+-          </div>
+-        )}
+-        {!c && (
+-          <div className="absolute inset-x-0 top-24 flex justify-center">
++      <section className="card-farm p-3">
++        <div className="mb-2 flex items-center justify-between px-1">
++          <span className="font-display text-base font-bold">Giveaways</span>
++          <span className="text-xs font-bold text-muted-foreground">
++            Distribution amount <span className="font-display text-sm text-primary">{money(c?.distributionCents ?? 500)}</span>
++          </span>
++        </div>
++        {!c ? (
++          <div className="flex justify-center py-6">
+             <Loader2 className="h-6 w-6 animate-spin" />
+           </div>
++        ) : c.rows.length === 0 ? (
++          <p className="py-6 text-center text-sm text-muted-foreground">No one has joined yet. Be the first!</p>
++        ) : (
++          <ol className="space-y-1.5">
++            {c.rows.map((r) => (
++              <li
++                key={`${r.rank}-${r.name}`}
++                className={`rounded-xl px-3 py-2 ${r.me ? "bg-primary text-primary-foreground" : "bg-secondary"}`}
++              >
++                <div className="flex items-center gap-2">
++                  <span className="w-6 font-display font-bold tabular-nums">{r.rank}</span>
++                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">{r.name}</span>
++                  <span className="font-display text-sm font-bold tabular-nums">{r.prizeCents > 0 ? `+${prizeMoney(r.prizeCents)}` : "—"}</span>
++                </div>
++                <div className="mt-1 pl-8">
++                  <span className="text-[11px] font-bold opacity-80">{r.points} points</span>
++                  {r.me && <PointButton onPoint={load} />}
++                </div>
++              </li>
++            ))}
++          </ol>
+         )}
+-      </div>
++        <p className="mt-3 text-center text-[11px] text-muted-foreground">
++          Ranked by points. Everyone who joins gets a share when the points reach {goal}.
++        </p>
++      </section>
++
++      {c && !entered && !dismissed && (
++        <div className="fixed inset-0 z-30 flex items-center justify-center bg-foreground/40 px-6" onClick={() => setDismissed(true)}>
++          <div className="card-farm w-full max-w-xs p-5 text-center" onClick={(e) => e.stopPropagation()}>
++            <img src={CROPS.corn.image} alt="" className="mx-auto h-14 w-14" />
++            <p className="mt-2 font-display text-lg font-bold">Join with 1 corn</p>
++            <p className="text-sm text-muted-foreground">Give 1 harvested corn to join this giveaway.</p>
++            <p className="mt-1 text-xs font-bold">You have {corn} 🌽</p>
++            <button className="btn-game btn-gold mt-3 w-full" disabled={busy || corn < 1} onClick={enter}>
++              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Give 1 🌽 & Join"}
++            </button>
++            <button className="mt-2 text-xs font-bold text-muted-foreground" onClick={() => setDismissed(true)}>
++              Maybe later
++            </button>
++          </div>
++        </div>
++      )}
++      {c && !entered && dismissed && (
++        <button className="btn-game btn-gold fixed inset-x-0 bottom-28 z-20 mx-auto w-56" onClick={() => setDismissed(false)}>
++          Join with 1 🌽
++        </button>
++      )}
+     </GameShell>
+   );
+ }
+ 
+-const placeholderRows = Array.from({ length: 10 }, (_, i) => ({ rank: i + 1, name: "Farmer", soldCents: 0, prizeCents: 0, me: false }));
++/** "1 Ad = +1": same rewarded-ad flow and shared 3-minute timer as the field buttons. */
++function PointButton({ onPoint }: { onPoint: () => void }) {
++  const ad = useRewardedAd();
++  const watch = async () => {
++    try {
++      const result = await ad.play("wheat", 0, async () => {
++        toast.success("+1 point 🎁");
++        onPoint();
++      }, "contest");
++      if (result === "test") toast.message("Test ad played. AdsGram debug ads do not grant points.");
++    } catch (e) {
++      toast.error(e instanceof Error ? e.message : "Ad could not be played");
++    }
++  };
++  return (
++    <Button
++      className="btn-game btn-gold mt-1.5 flex h-auto w-full gap-1 px-2 py-1 text-xs"
++      disabled={ad.loading || ad.left > 0}
++      onClick={watch}
++    >
++      {ad.loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
++      {ad.left > 0 ? ad.timer : "1 Ad = +1"}
++    </Button>
++  );
++}
+diff --git a/frontend/src/routes/index.tsx b/frontend/src/routes/index.tsx
+index 0fbed9d..4cbf067 100644
+--- a/frontend/src/routes/index.tsx
++++ b/frontend/src/routes/index.tsx
+@@ -1,11 +1,10 @@
+ import { createFileRoute } from "@tanstack/react-router";
+ import { useEffect, useMemo, useState } from "react";
+ import { toast } from "sonner";
+-import { Loader2, Lock, PlayCircle } from "lucide-react";
++import { Loader2, Lock } from "lucide-react";
+ import { GameShell, SectionTitle } from "@/components/GameShell";
+ import { unlockCrop } from "@/lib/unlock";
+ import { Button } from "@/components/ui/button";
+-import { Popover, PopoverContent, PopoverAnchor } from "@/components/ui/popover";
+ import { UNLOCK_CENTS, FIELD_PART_COUNTS, GROW_STAGES, growStage, isReady, msLeft } from "@shared/rules";
+ import { useRewardedAd } from "@/lib/use-ad";
+ import { CROPS, CROP_KEYS, haptic, useGame, type CropKey } from "@/lib/game";
+@@ -112,9 +111,9 @@ function SeedTile({ k }: { k: CropKey }) {
+ 
+ function FieldCard({ k }: { k: CropKey }) {
+   return (
+-    <div className={`card-farm p-2 ${k === "pumpkin" ? "col-span-2" : ""}`}>
++    <div className={`card-farm p-1.5 ${k === "pumpkin" ? "col-span-2" : ""}`}>
+       <div className="mb-1.5 px-1"><span className="font-display text-sm font-semibold">{CROPS[k].name} Field</span></div>
+-      <div className="grid grid-cols-2 gap-2">
++      <div className="grid grid-cols-2 gap-1.5">
+         {Array.from({ length: FIELD_PART_COUNTS[k] }, (_, part) => <FieldPart key={part} k={k} part={part} />)}
+       </div>
+     </div>
+@@ -137,12 +136,11 @@ function FieldPart({ k, part }: { k: CropKey; part: number }) {
+   const stage = growStage(k, field, now);
+   const [shake, setShake] = useState(false);
+   const [busy, setBusy] = useState(false);
+-  const [open, setOpen] = useState(false);
+ 
+   const onTap = async () => {
+     if (busy) return;
+     haptic();
+-    if (field.planted && !ready) return setOpen(true);
++    if (field.planted && !ready) return;
+     setBusy(true);
+     const res = await game.tap(k, part);
+     setBusy(false);
+@@ -159,8 +157,7 @@ function FieldPart({ k, part }: { k: CropKey; part: number }) {
+   const scale = 0.45 + (0.55 * stage) / GROW_STAGES;
+ 
+   return (
+-    <Popover open={open} onOpenChange={setOpen}>
+-      <PopoverAnchor asChild>
++    <div className="flex flex-col gap-1.5">
+         <Button
+           type="button" variant="ghost" disabled={busy}
+           aria-label={`${crop.name} field part ${part + 1}: ${ready ? "harvest" : field.planted ? "growing" : "plant"}`}
+@@ -185,15 +182,13 @@ function FieldPart({ k, part }: { k: CropKey; part: number }) {
+             <span className="text-[10px] font-bold text-primary-foreground">Empty</span>
+           ) : null}
+         </Button>
+-      </PopoverAnchor>
+-      <PopoverContent side="top" className="w-72 p-3">
+-        <AdPanel k={k} part={part} onDone={() => setOpen(false)} />
+-      </PopoverContent>
+-    </Popover>
++        <AdPanel k={k} part={part} active={field.planted && !ready} />
++    </div>
+   );
+ }
+ 
+-function AdPanel({ k, part, onDone }: { k: CropKey; part: number; onDone: () => void }) {
++/** Shown under every field part: growth-by-ads progress + "Watch Ads to Skip Time" (shared 3-min cooldown). */
++function AdPanel({ k, part, active }: { k: CropKey; part: number; active: boolean }) {
+   const game = useGame();
+   const ad = useRewardedAd();
+   const crop = CROPS[k];
+@@ -202,10 +197,10 @@ function AdPanel({ k, part, onDone }: { k: CropKey; part: number; onDone: () =>
+   const pct = Math.min(100, (ads / crop.adsNeed) * 100);
+ 
+   const watch = async () => {
++    if (!active) return;
+     try {
+       const result = await ad.play(k, part, async (verifiedCrop) => {
+         toast.success(`${CROPS[verifiedCrop].name} grew a little 🌱`);
+-        onDone();
+       });
+       if (result === "test") {
+         toast.message("Test ad played. AdsGram debug ads do not grant crop growth.");
+@@ -216,21 +211,32 @@ function AdPanel({ k, part, onDone }: { k: CropKey; part: number; onDone: () =>
+   };
+ 
+   return (
+-    <div className="flex items-center gap-3">
+-      <img src={crop.image} alt={crop.name} className="h-12 w-12 shrink-0" />
+-      <div className="min-w-0 flex-1">
+-        <p className="text-xs font-bold">Watch ads to speed up growth</p>
+-        <div className="mt-1 flex items-center gap-2">
+-          <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
+-            <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+-          </div>
+-          <span className="text-[10px] font-bold tabular-nums">{ads}/{crop.adsNeed}</span>
++    <div className="rounded-lg bg-secondary p-1">
++      <div className="flex items-center gap-1.5">
++        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-background">
++          <div className="h-full bg-primary transition-all" style={{ width: `${active ? pct : 0}%` }} />
+         </div>
+-        <Button className="btn-game mt-2 w-full gap-1 px-2 py-1 text-xs" disabled={ad.loading || ad.left > 0} onClick={watch}>
+-          {ad.loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+-          {ad.left > 0 ? ad.timer : "Watch Ad"}
+-        </Button>
++        <span className="text-[9px] font-bold tabular-nums">{active ? ads : 0}/{crop.adsNeed}</span>
+       </div>
++      <button
++        type="button"
++        className="btn-ad mt-1.5"
++        disabled={!active || ad.loading || ad.left > 0}
++        onClick={watch}
++      >
++        <span className="flex min-h-[2.3em] flex-col justify-center">
++          {ad.loading ? (
++            <Loader2 className="mx-auto h-4 w-4 animate-spin" />
++          ) : ad.left > 0 ? (
++            <span>{ad.timer}</span>
++          ) : (
++            <>
++              <span>Watch Ads</span>
++              <span>to Skip Time</span>
++            </>
++          )}
++        </span>
++      </button>
+     </div>
+   );
+ }
+diff --git a/frontend/src/styles.css b/frontend/src/styles.css
+index 94d2707..7e35872 100644
+--- a/frontend/src/styles.css
++++ b/frontend/src/styles.css
+@@ -122,6 +122,35 @@
+   &:disabled { opacity: 0.45; pointer-events: none; }
+ }
+ 
++/* Ad button under every field part: bold, two readable lines, label stays inside the pill. */
++@utility btn-ad {
++  appearance: none;
++  -webkit-appearance: none;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  width: 100%;
++  gap: 0.3rem;
++  border: 0;
++  border-radius: var(--radius-lg);
++  padding: 0.4rem 0.15rem;
++  background: var(--gradient-primary);
++  color: var(--color-primary-foreground);
++  box-shadow: var(--shadow-pop);
++  text-shadow: 0 1px 0 oklch(0.3 0.1 140 / 0.55);
++  font-family: var(--font-display);
++  font-size: clamp(0.59375rem, 2.6vw, 0.6875rem);
++  font-weight: 800;
++  line-height: 1.15;
++  letter-spacing: 0.01em;
++  text-align: center;
++  cursor: pointer;
++  transition: transform 0.1s, box-shadow 0.1s, opacity 0.2s;
++  &:active { transform: translateY(3px); box-shadow: 0 1px 0 0 oklch(0.4 0.1 140 / 0.35); }
++  &:disabled { opacity: 0.85; filter: saturate(0.55); cursor: not-allowed; }
++  &:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
++}
++
+ @utility btn-gold {
+   background: var(--gradient-gold);
+   color: var(--color-gold-foreground);
+diff --git a/shared/rules.test.ts b/shared/rules.test.ts
+index 568f151..438fc29 100644
+--- a/shared/rules.test.ts
++++ b/shared/rules.test.ts
+@@ -31,7 +31,7 @@ describe("seeds, growth and daily reward", () => {
+   });
+ });
+ 
+-import { REFERRAL_PERCENT, UNLOCK_CENTS, contestPrizeCents, contestPrizesCents, isUnlocked, referralRewardCents, weekStart, CONTEST_ENTRY_CENTS, CONTEST_SHOWN } from "./rules.js";
++import { REFERRAL_PERCENT, UNLOCK_CENTS, contestPrizeCents, contestPrizesCents, isUnlocked, referralRewardCents, weekStart, GIVEAWAY_DISTRIBUTION_CENTS, GIVEAWAY_GOAL_POINTS } from "./rules.js";
+ describe("unlocks, referral and contest", () => {
+   it("unlock prices: carrot $0.30, tomato $0.40, pumpkin $0.50; wheat/corn free", () => {
+     expect(UNLOCK_CENTS).toEqual({ carrot: 30, tomato: 40, pumpkin: 50 });
+@@ -44,23 +44,18 @@ describe("unlocks, referral and contest", () => {
+     expect(REFERRAL_PERCENT).toBe(20);
+     expect(referralRewardCents(50)).toBe(10);
+   });
+-  it("one entrant receives the entire $0.05 pool", () => {
+-    expect(CONTEST_ENTRY_CENTS).toBe(5);
+-    expect(contestPrizesCents(5, 1)).toEqual([5]);
+-    expect(contestPrizeCents(2, 5, 1)).toBe(0);
++  it("one entrant receives the entire $5 giveaway", () => {
++    expect(GIVEAWAY_DISTRIBUTION_CENTS).toBe(500);
++    expect(GIVEAWAY_GOAL_POINTS).toBe(2000);
++    expect(contestPrizesCents(500, 1)).toEqual([500]);
++    expect(contestPrizeCents(2, 500, 1)).toBe(0);
+   });
+-  it.each([2, 3, 4, 10, 11, 30])("%i entrants share the entire pool in descending rank order, capped at 10", (entrants) => {
+-    const pool = entrants * 5;
+-    const prizes = contestPrizesCents(pool, entrants);
+-    expect(prizes).toHaveLength(Math.min(entrants, 10));
+-    expect(prizes.reduce((sum, prize) => sum + Math.round(prize * 100), 0)).toBe(pool * 100);
+-    prizes.slice(1).forEach((prize, index) => expect(prizes[index]).toBeGreaterThan(prize));
+-    expect(contestPrizeCents(11, pool, entrants)).toBe(0);
+-  });
+-  it("joining grows the pool and recalculates existing ranks", () => {
+-    expect(contestPrizeCents(1, 10, 2)).not.toBe(contestPrizeCents(1, 5, 1));
+-    expect(contestPrizeCents(2, 15, 3)).not.toBe(contestPrizeCents(2, 10, 2));
+-    expect(CONTEST_SHOWN).toBe(30);
++  it.each([2, 3, 10, 11, 30, 250])("all %i entrants get a prize from the $5, descending by rank", (entrants) => {
++    const prizes = contestPrizesCents(500, entrants);
++    expect(prizes).toHaveLength(entrants);
++    expect(prizes.reduce((sum, prize) => sum + Math.round(prize * 100), 0)).toBe(50000);
++    prizes.slice(1).forEach((prize, index) => expect(prizes[index]).toBeGreaterThanOrEqual(prize));
++    expect(prizes[entrants - 1]).toBeGreaterThan(0);
+   });
+   it("no entrants means no prizes", () => {
+     expect(contestPrizesCents(0, 0)).toEqual([]);
+diff --git a/shared/rules.ts b/shared/rules.ts
+index 9ec2041..3935d83 100644
+--- a/shared/rules.ts
++++ b/shared/rules.ts
+@@ -39,25 +39,21 @@ export const UNLOCK_CENTS: Partial<Record<CropKey, number>> = { carrot: 30, toma
+ export const isLockable = (k: CropKey) => UNLOCK_CENTS[k] !== undefined;
+ export const isUnlocked = (k: CropKey, unlocked?: Partial<Record<CropKey, boolean>>) => !isLockable(k) || !!unlocked?.[k];
+ 
+-/** Weekly contest: entry costs 1 harvested pumpkin, each entry adds 5 cents to the pool. */
+-export const CONTEST_ENTRY_CENTS = 5;
+-export const CONTEST_SHOWN = 30;
+-/** Descending relative weights, normalized over only the eligible entrants. */
+-export const CONTEST_PRIZE_WEIGHTS = [25, 18, 13, 10, 8, 7, 6, 5, 4, 3];
+-const WEEK_MS = 7 * 86_400_000;
+-/** Contest weeks start Monday 00:00 UTC. */
+-export function weekStart(t: number): number {
+-  const d = new Date(t);
+-  const day = (d.getUTCDay() + 6) % 7;
+-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - day * 86_400_000;
+-}
+-export const weekEnd = (t: number) => weekStart(t) + WEEK_MS;
+-export const weekKey = (t: number) => dayKey(weekStart(t));
+-/** Allocate the entire pool in hundredths of a cent ($0.0001), without losing rounding remainders. */
++/** Giveaway: entry costs 1 harvested corn; every verified ad adds +1 point. */
++export const GIVEAWAY_ENTRY_CROP = "corn" as const;
++/** Total points (all entrants together) needed before the round is distributed. */
++export const GIVEAWAY_GOAL_POINTS = 2000;
++/** Fixed amount shared by every entrant of a round, by rank. */
++export const GIVEAWAY_DISTRIBUTION_CENTS = 500;
++export const CONTEST_SHOWN = 100;
++/**
++ * Split the whole amount between ALL entrants, higher rank gets more (linear weights n..1).
++ * Works in hundredths of a cent ($0.0001) without losing rounding remainders.
++ */
+ export function contestPrizesCents(poolCents: number, entrants: number): number[] {
+-  const count = Math.min(CONTEST_PRIZE_WEIGHTS.length, Math.max(0, Math.floor(entrants)));
++  const count = Math.max(0, Math.floor(entrants));
+   if (!count || poolCents <= 0) return [];
+-  const weights = CONTEST_PRIZE_WEIGHTS.slice(0, count);
++  const weights = Array.from({ length: count }, (_, i) => count - i);
+   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+   const units = Math.round(poolCents * 100);
+   const shares = weights.map((weight, rank) => {
+@@ -69,17 +65,27 @@ export function contestPrizesCents(poolCents: number, entrants: number): number[
+   for (const share of order.slice(0, remaining)) share.units += 1;
+   return shares.map((share) => share.units / 100);
+ }
+-/** Prize in cents for rank (1-based); only actual entrants in ranks 1..10 are eligible. */
++/** Prize in cents for rank (1-based) among all entrants. */
+ export const contestPrizeCents = (rank: number, poolCents: number, entrants: number): number =>
+   Number.isInteger(rank) && rank > 0 ? (contestPrizesCents(poolCents, entrants)[rank - 1] ?? 0) : 0;
++const WEEK_MS = 7 * 86_400_000;
++/** Contest weeks start Monday 00:00 UTC. */
++export function weekStart(t: number): number {
++  const d = new Date(t);
++  const day = (d.getUTCDay() + 6) % 7;
++  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - day * 86_400_000;
++}
++export const weekEnd = (t: number) => weekStart(t) + WEEK_MS;
++export const weekKey = (t: number) => dayKey(weekStart(t));
+ export type ContestView = {
+-  week: string;
+-  endsAt: number;
++  round: number;
+   serverNow: number;
+-  poolCents: number;
++  goalPoints: number;
++  totalPoints: number;
++  distributionCents: number;
+   entered: boolean;
+   entrants: number;
+-  rows: { rank: number; name: string; soldCents: number; prizeCents: number; me: boolean }[];
++  rows: { rank: number; name: string; points: number; prizeCents: number; me: boolean }[];
+ };
+ 
+ export type Field = { planted: boolean; plantedAt: number; ads: number };
