@@ -14,6 +14,7 @@ type AdController = {
 };
 
 const FAILED_SESSION_KEY_PREFIX = "adsgram:failed-session:";
+const STARTED_SESSION_KEY_PREFIX = "adsgram:started-session:";
 
 function failedSessionKey(userId: number | string) {
   return `${FAILED_SESSION_KEY_PREFIX}${userId}`;
@@ -42,6 +43,36 @@ function forgetFailedSession(userId: number | string, sessionId: string) {
     if (window.localStorage.getItem(key) === sessionId) window.localStorage.removeItem(key);
   } catch {
     // Leaving the ID stored is safe: server cancellation is idempotent and session-specific.
+  }
+}
+
+function startedSessionKey(userId: number | string) {
+  return `${STARTED_SESSION_KEY_PREFIX}${userId}`;
+}
+
+function readStartedSessionId(userId: number | string): string | undefined {
+  try {
+    const value = window.localStorage.getItem(startedSessionKey(userId));
+    return value && /^[a-f0-9]{32}$/.test(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberStartedSession(userId: number | string, sessionId: string) {
+  try {
+    window.localStorage.setItem(startedSessionKey(userId), sessionId);
+  } catch {
+    // The server-side phase marker is the fallback if browser storage is unavailable.
+  }
+}
+
+function forgetStartedSession(userId: number | string, sessionId: string) {
+  try {
+    const key = startedSessionKey(userId);
+    if (window.localStorage.getItem(key) === sessionId) window.localStorage.removeItem(key);
+  } catch {
+    // Storage may be unavailable; backend state and TTL still recover the session.
   }
 }
 
@@ -151,6 +182,11 @@ export function useRewardedAd() {
       const session = await gameApi.startAdSession(game.initData, crop, part, target, failedSessionId);
       if (failedSessionId) forgetFailedSession(game.user.id, failedSessionId);
       sessionId = session.sessionId;
+      const previousStartedSessionId = readStartedSessionId(game.user.id);
+      if (previousStartedSessionId && previousStartedSessionId !== sessionId) {
+        forgetStartedSession(game.user.id, previousStartedSessionId);
+      }
+      const alreadyStartedLocally = readStartedSessionId(game.user.id) === sessionId;
 
       // AdsGram identifies callbacks by Telegram user ID, not session ID.
       // Do not resume a pending reward from a different button/target.
@@ -162,13 +198,19 @@ export function useRewardedAd() {
         throw new Error(`A rewarded ad is already pending for ${pendingTarget}. Return to that button to finish verification.`);
       }
 
-      if (!session.resumed) {
+      if (!session.resumed && !alreadyStartedLocally) {
         try {
-          const result = await showAdWithTimeout(AdControllerRef.current);
+          const onAdStarted = () => {
+            rememberStartedSession(game.user.id, sessionId!);
+            // Mark onStart, not before show(): failed/no-fill loads remain safely cancellable.
+            void gameApi.markAdSessionStarted(game.initData!, sessionId!).catch(() => undefined);
+          };
+          const result = await showAdWithStartupTimeout(AdControllerRef.current, onAdStarted);
           if (!result.done) throw new Error(target === "contest" ? "Watch the ad till the end to get +1 point" : "Watch the ad till the end to speed up growth");
         } catch (error) {
           // Persist first. If this network call fails or the app closes, the next
           // Watch Ads click will ask the backend to cancel this exact failed reservation.
+          forgetStartedSession(game.user.id, sessionId);
           rememberFailedSession(game.user.id, sessionId);
           try {
             await gameApi.cancelAdSession(game.initData, sessionId);
@@ -184,12 +226,18 @@ export function useRewardedAd() {
       for (let attempt = 0; attempt < 45; attempt++) {
         const status = await gameApi.getAdSessionStatus(game.initData, sessionId);
         if (status.verified && status.player) {
+          forgetStartedSession(game.user.id, sessionId);
+          forgetFailedSession(game.user.id, sessionId);
           game.setState(status.player);
           await onDone(session.crop);
           setNow(Date.now());
           return "rewarded";
         }
-        if (status.expired) throw new Error("Ad verification expired. Please try again.");
+        if (status.expired) {
+          forgetStartedSession(game.user.id, sessionId);
+          forgetFailedSession(game.user.id, sessionId);
+          throw new Error("Ad verification expired. Please try again.");
+        }
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
       throw new Error(
