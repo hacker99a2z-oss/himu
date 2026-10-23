@@ -47,10 +47,12 @@ export const gameApi = {
     target: "field" | "contest" = "field",
     abandonSessionId?: string,
   ) =>
-    request<{ sessionId: string; resumed: boolean; crop: CropKey; part: number; target: "field" | "contest" }>(
+    request<{ sessionId: string; resumed: boolean; phase: "reserved" | "playing"; crop: CropKey; part: number; target: "field" | "contest" }>(
       "/api/ads/session/start",
       { initData, crop, part, target, ...(abandonSessionId ? { abandonSessionId } : {}) },
     ),
+  markAdSessionStarted: (initData: string, sessionId: string) =>
+    request<{ started: boolean }>("/api/ads/session/started", { initData, sessionId }),
   getAdSessionStatus: (initData: string, sessionId: string) =>
     request<{ verified: boolean; expired: boolean; player: PlayerView | null }>("/api/ads/session/status", {
       initData,
