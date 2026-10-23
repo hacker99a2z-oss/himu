@@ -78,6 +78,17 @@ export function useRewardedAd() {
 
       const session = await gameApi.startAdSession(game.initData, crop, part, target);
       sessionId = session.sessionId;
+
+      // AdsGram identifies callbacks by Telegram user ID, not session ID.
+      // Do not resume a pending reward from a different button/target.
+      if (session.target !== target || session.crop !== crop || session.part !== part) {
+        sessionId = undefined;
+        const pendingTarget = session.target === "contest"
+          ? "the giveaway point button"
+          : `the ${session.crop} field, part ${session.part + 1}`;
+        throw new Error(`A rewarded ad is already pending for ${pendingTarget}. Return to that button to finish verification.`);
+      }
+
       if (!session.resumed) {
         try {
           const result = await AdControllerRef.current.show();
